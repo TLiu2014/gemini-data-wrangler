@@ -2,12 +2,12 @@ import { useState } from 'react';
 import { Send, Sparkles, Loader2 } from 'lucide-react';
 
 interface Props {
-  schema: any[]; // The column definitions
+  schema: any[]; // The column definitions (available for future use)
   onTransform: (userPrompt: string) => Promise<void>;
   isProcessing: boolean;
 }
 
-export function SmartTransform({ schema, onTransform, isProcessing }: Props) {
+export function SmartTransform({ onTransform, isProcessing }: Props) {
   const [prompt, setPrompt] = useState('');
 
   const handleSubmit = (e: React.FormEvent) => {
