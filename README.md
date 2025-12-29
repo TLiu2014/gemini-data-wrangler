@@ -1,73 +1,95 @@
-# React + TypeScript + Vite
+# Gemini Data Wrangler
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A lightweight data transformation web app powered by Gemini 3, supporting operations such as join, union, filter, and more. Built for the [Gemini 3 Hackathon](https://gemini3.devpost.com/).
 
-Currently, two official plugins are available:
+## Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- **AI-Powered Transformations**: Use natural language to transform your data with Gemini 3
+- **Lightweight**: No heavy database - uses DuckDB WASM for in-browser processing
+- **Interactive Visualizations**: Automatic chart generation based on your data
+- **CSV Support**: Upload and work with CSV files directly in the browser
 
-## React Compiler
+## Getting Started
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+### Prerequisites
 
-## Expanding the ESLint configuration
+- Node.js 18+ and npm
+- Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey)
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+### Installation
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+1. Clone the repository:
+```bash
+git clone <repository-url>
+cd gemini-data-wrangler
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
-
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+2. Install all dependencies:
+```bash
+npm run install:all
 ```
+
+3. Set up environment variables:
+```bash
+cp server/.env.example server/.env
+# Edit server/.env and add your GEMINI_API_KEY
+```
+
+4. Start the development servers:
+```bash
+npm run dev
+```
+
+This will start:
+- Backend server on `http://localhost:3000`
+- Frontend UI on `http://localhost:5173` (or another port if 5173 is taken)
+
+### Usage
+
+1. Open your browser to the frontend URL (usually `http://localhost:5173`)
+2. Drag and drop a CSV file to upload it
+3. Use natural language prompts to transform your data (e.g., "Filter for sales over $500", "Group by city and calculate totals")
+4. View the results in both table and chart formats
+
+## Project Structure
+
+```
+gemini-data-wrangler/
+├── server/          # Express backend with Gemini API integration
+│   ├── index.js     # Main server file
+│   └── package.json
+├── ui/              # React frontend with Vite
+│   ├── src/
+│   │   ├── App.tsx           # Main app component
+│   │   ├── SmartTransform.tsx # AI transformation interface
+│   │   ├── DynamicChart.tsx  # Chart visualization
+│   │   └── db.ts             # DuckDB initialization
+│   └── package.json
+└── package.json     # Root package.json for monorepo scripts
+```
+
+## Supported Operations
+
+The app currently supports the following data transformation operations through natural language:
+
+- **Filtering**: Filter rows based on conditions
+- **Grouping**: Group data by columns and aggregate
+- **Joins**: Join multiple datasets (when multiple files are supported)
+- **Aggregations**: Calculate sums, averages, counts, etc.
+- **Sorting**: Order data by columns
+- **Column Selection**: Select specific columns
+- **Calculations**: Perform mathematical operations on columns
+
+All operations are powered by DuckDB SQL generated by Gemini 3.
+
+## Development
+
+- `npm run dev` - Start both server and UI in development mode
+- `npm run dev:server` - Start only the backend server
+- `npm run dev:ui` - Start only the frontend UI
+- `npm run build` - Build the frontend for production
+
+## License
+
+MIT
+
