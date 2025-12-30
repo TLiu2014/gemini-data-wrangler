@@ -158,7 +158,7 @@ app.post('/api/transform', async (req, res) => {
         const schemasInfo = allSchemas ? 
             `Available Tables:\n${allSchemas.map(s => `- ${s.tableName}: ${JSON.stringify(s.schema)}`).join('\n')}` :
             `Current Table Schema (DuckDB):\n${JSON.stringify(schema)}`;
-
+        
         const prompt = `
             You are a Data Engineer Expert.
             

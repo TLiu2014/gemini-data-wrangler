@@ -79,6 +79,8 @@ function App() {
     const saved = localStorage.getItem('show_visualization_presets');
     return saved !== null ? saved === 'true' : true;
   });
+  // Map stage ID to result table ID
+  const [stageToTableMap, setStageToTableMap] = useState<Map<string, string>>(new Map());
 
   // Get current active table data
   const activeTable = tables.find(t => t.id === activeTableId);
@@ -372,7 +374,7 @@ function App() {
         
         // Set as active if it's the first table
         setActiveTableId(prev => prev || tableId);
-        
+    
         // Add LOAD stage
         const loadStage: TransformationStage = {
           id: `stage_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
@@ -431,12 +433,18 @@ function App() {
     try {
       // Use activeTable as default source, or first table if no active table
       const defaultTableName = activeTable?.name || (tables.length > 0 ? tables[0].name : '');
-      
+
       // Generate SQL from the stage
       const sql = generateSQLFromStage(stage, defaultTableName);
       
-      // Execute the transformation and create result table
-      const resultTableName = `result_${Date.now()}`;
+      // Get stage index for table naming
+      // If stage exists in list, use its index; otherwise use the next index (for new stages)
+      const stageIndex = transformationStages.findIndex(s => s.id === stage.id);
+      const displayIndex = stageIndex >= 0 ? stageIndex : transformationStages.length;
+      
+      // Execute the transformation and create result table with stage index and type
+      const stageTypeLower = stage.type.toLowerCase();
+      const resultTableName = `result_stage_${displayIndex}_${stageTypeLower}`;
       await conn.query(`CREATE OR REPLACE TABLE ${resultTableName} AS ${sql}`);
       
       // Get the result data
@@ -450,13 +458,19 @@ function App() {
       const newTable: TableData = {
         id: resultTableId,
         name: resultTableName,
-        fileName: `Result of: ${stage.description}`,
+        fileName: `Result of stage #${displayIndex}: ${stage.description}`,
         schema: resultSchema,
         rows: resultRows,
         createdAt: new Date()
       };
 
       setTables(prev => [...prev, newTable]);
+      // Store mapping from stage ID to table ID
+      setStageToTableMap(prev => {
+        const newMap = new Map(prev);
+        newMap.set(stage.id, resultTableId);
+        return newMap;
+      });
       setActiveTableId(resultTableId);
       setStatus(`Done! Created result table with ${resultRows.length} rows.`);
       setError(null);
@@ -530,24 +544,42 @@ function App() {
   };
 
   const handleStageAdd = () => {
-    // Don't close existing editable card, just ignore the click
-    if (newStage || editingStageId) {
+    // Don't add if already editing
+    if (editingStageId || newStage) {
       return;
     }
-    // Start adding new stage
-    setNewStage({
-      id: `new_${Date.now()}`,
-      type: 'FILTER',
+    
+    // Create new stage directly in the flow
+    const newStageId = `stage_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const stageToAdd: TransformationStage = {
+      id: newStageId,
+      type: 'FILTER', // Default type, user can change it
       description: '',
       timestamp: new Date(),
       data: {}
-    });
-    setEditingStageId(null);
+    };
+    
+    // Add to stages list immediately
+    setTransformationStages(prev => [...prev, stageToAdd]);
+    
+    // Set it to editing mode so user can configure it
+    setEditingStageId(newStageId);
+    setNewStage(null);
   };
 
   const handleStageStartEdit = (stageId: string) => {
     if (stageId === '') {
-      // Cancel editing
+      // Cancel editing - if it's a newly added stage (not configured yet), remove it
+      if (editingStageId) {
+        const currentEditingStage = transformationStages.find(s => s.id === editingStageId);
+        // Check if it's a newly added stage: empty description and empty data
+        if (currentEditingStage && 
+            (!currentEditingStage.description || currentEditingStage.description.trim() === '') &&
+            (!currentEditingStage.data || Object.keys(currentEditingStage.data).length === 0)) {
+          // This is a newly added stage that wasn't configured - remove it
+          setTransformationStages(prev => prev.filter(s => s.id !== editingStageId));
+        }
+      }
       setEditingStageId(null);
     } else {
       setEditingStageId(stageId);
@@ -593,34 +625,7 @@ function App() {
       
       const { sql, chartType, xAxis, yAxis, zAxis, explanation, transformationStages: stagesFromGemini } = await response.json();
       
-      // 2. Execute Gemini's SQL and create result table
-      setStatus(`Executing: ${explanation}`);
-      const resultTableName = `result_${Date.now()}`;
-      await conn.query(`CREATE OR REPLACE TABLE ${resultTableName} AS ${sql}`);
-      
-      const result = await conn.query(`SELECT * FROM ${resultTableName} LIMIT 1000`);
-      const resultRows = result.toArray().map(r => r.toJSON());
-      const schemaRes = await conn.query(`DESCRIBE ${resultTableName}`);
-      const resultSchema = schemaRes.toArray().map(r => r.toJSON());
-
-      // 3. Create new table for result
-      const resultTableId = `table_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      const newTable: TableData = {
-        id: resultTableId,
-        name: resultTableName,
-        fileName: `Result of: ${userPrompt}`,
-        schema: resultSchema,
-        rows: resultRows,
-        createdAt: new Date()
-      };
-
-      setTables(prev => [...prev, newTable]);
-      setActiveTableId(resultTableId);
-      setChartConfig({ type: chartType, xAxis, yAxis, zAxis });
-      setStatus(`Done! Created result table with ${resultRows.length} rows.`);
-      setError(null);
-
-      // 4. Add transformation stages from Gemini response
+      // 4. Add transformation stages from Gemini response first to get the final stage index
       let stagesToAdd: TransformationStage[] = [];
       
       if (stagesFromGemini && Array.isArray(stagesFromGemini) && stagesFromGemini.length > 0) {
@@ -664,6 +669,46 @@ function App() {
         
         console.log('✅ Parsed stages from SQL:', stagesToAdd);
       }
+      
+      // Get the final stage index for table naming
+      const finalStageIndex = transformationStages.length + stagesToAdd.length - 1;
+      const lastStage = stagesToAdd.length > 0 ? stagesToAdd[stagesToAdd.length - 1] : null;
+      
+      // 2. Execute Gemini's SQL and create result table with stage index and type
+      setStatus(`Executing: ${explanation}`);
+      const stageTypeLower = lastStage ? lastStage.type.toLowerCase() : 'custom';
+      const resultTableName = `result_stage_${finalStageIndex}_${stageTypeLower}`;
+      await conn.query(`CREATE OR REPLACE TABLE ${resultTableName} AS ${sql}`);
+      
+      const result = await conn.query(`SELECT * FROM ${resultTableName} LIMIT 1000`);
+      const resultRows = result.toArray().map(r => r.toJSON());
+      const schemaRes = await conn.query(`DESCRIBE ${resultTableName}`);
+      const resultSchema = schemaRes.toArray().map(r => r.toJSON());
+
+      // 3. Create new table for result
+      const resultTableId = `table_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const newTable: TableData = {
+        id: resultTableId,
+        name: resultTableName,
+        fileName: `Result of stage #${finalStageIndex}: ${userPrompt}`,
+        schema: resultSchema,
+        rows: resultRows,
+        createdAt: new Date()
+      };
+
+      setTables(prev => [...prev, newTable]);
+      // Store mapping from last stage ID to table ID
+      if (lastStage) {
+        setStageToTableMap(prev => {
+          const newMap = new Map(prev);
+          newMap.set(lastStage.id, resultTableId);
+          return newMap;
+        });
+      }
+      setActiveTableId(resultTableId);
+      setChartConfig({ type: chartType, xAxis, yAxis, zAxis });
+      setStatus(`Done! Created result table with ${resultRows.length} rows.`);
+      setError(null);
       
       if (stagesToAdd.length > 0) {
         setTransformationStages(prev => [...prev, ...stagesToAdd]);
@@ -764,8 +809,8 @@ function App() {
             <div style={{
               position: 'sticky',
               top: '0',
-              height: 'fit-content',
-              maxHeight: 'calc(100vh - 100px)',
+              height: '85vh',
+              maxHeight: '85vh',
               overflowY: 'auto',
               paddingRight: '10px'
             }}>
@@ -778,6 +823,8 @@ function App() {
                 onStageAdd={handleStageAdd}
                 editingStageId={editingStageId}
                 newStage={newStage}
+                stageToTableMap={stageToTableMap}
+                onShowTable={(tableId) => setActiveTableId(tableId)}
               />
             </div>
           }
@@ -888,15 +935,7 @@ function App() {
 
       {/* 2. Transformation Section */}
         {tables.length > 0 && (
-          <>
-          {/* Table Tabs */}
-          <TableTabs 
-            tables={tables}
-            activeTableId={activeTableId}
-            onTableSelect={handleTableSelect}
-            onTableClose={handleTableClose}
-          />
-
+        <>
           <SmartTransform 
             schema={schema} 
             onTransform={handleTransform} 
@@ -933,6 +972,14 @@ function App() {
           )}
 
           {/* 4. Data Grid */}
+          {/* Table Tabs */}
+          <TableTabs 
+            tables={tables}
+            activeTableId={activeTableId}
+            onTableSelect={handleTableSelect}
+            onTableClose={handleTableClose}
+          />
+          
           <div style={{ overflowX: 'auto', marginTop: '20px', border: `1px solid ${themeConfig.colors.border}`, borderRadius: '8px', overflow: 'hidden' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
               <thead style={{ background: themeConfig.colors.surface }}>
