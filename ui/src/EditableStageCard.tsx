@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Save, X, Edit2 } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Save, X } from 'lucide-react';
 import { useTheme } from './ThemeProvider';
 import type { TransformationStage, JoinType, FilterOperator, UnionType } from './types';
 import { getStageIcon, getStageColor } from './TransformationStages';
@@ -7,7 +7,7 @@ import { getStageIcon, getStageColor } from './TransformationStages';
 
 interface Props {
   stage: TransformationStage | null; // null means new stage
-  tables: Array<{ id: string; name: string }>;
+  tables: Array<{ id: string; name: string; schema?: any[] }>;
   onSave: (stage: TransformationStage) => Promise<void> | void;
   onCancel: () => void;
   onDelete?: (stageId: string) => void;
@@ -18,8 +18,19 @@ export function EditableStageCard({ stage, tables, onSave, onCancel, onDelete }:
   const [type, setType] = useState<TransformationStage['type']>(stage?.type || 'FILTER');
   const [description, setDescription] = useState(stage?.description || '');
   const [data, setData] = useState<any>(stage?.data || {});
-  const [isEditing, setIsEditing] = useState(!stage); // New stages start in edit mode
   const [validationErrors, setValidationErrors] = useState<Record<string, boolean>>({});
+  
+  // When the stage prop changes, reset local state to match the stage
+  // This ensures we always start with the current stage values when editing
+  useEffect(() => {
+    if (stage) {
+      // Reset to stage values - this ensures we don't carry over stale state
+      setType(stage.type);
+      setDescription(stage.description);
+      setData(stage.data || {});
+      setValidationErrors({});
+    }
+  }, [stage?.id]); // Only reset when stage ID changes (i.e., different stage)
 
   const color = getStageColor(type);
 
@@ -130,21 +141,11 @@ export function EditableStageCard({ stage, tables, onSave, onCancel, onDelete }:
   };
 
   const handleCancel = () => {
-    if (stage) {
-      // Reset to original values
-      setType(stage.type);
-      setDescription(stage.description);
-      setData(stage.data || {});
-      setIsEditing(false);
-    } else {
-      // New stage - cancel means remove it
-      onCancel();
-    }
+    // Call parent's cancel handler to exit edit mode
+    onCancel();
   };
 
   const renderTypeSpecificFields = () => {
-    if (!isEditing) return null;
-
     switch (type) {
       case 'JOIN':
         return (
@@ -179,7 +180,7 @@ export function EditableStageCard({ stage, tables, onSave, onCancel, onDelete }:
               <select
                 value={data.leftTable || ''}
                 onChange={(e) => {
-                  setData({ ...data, leftTable: e.target.value });
+                  setData({ ...data, leftTable: e.target.value, leftKey: '' }); // Clear leftKey when leftTable changes
                   if (validationErrors.leftTable) {
                     setValidationErrors({ ...validationErrors, leftTable: false });
                   }
@@ -205,7 +206,7 @@ export function EditableStageCard({ stage, tables, onSave, onCancel, onDelete }:
               <select
                 value={data.rightTable || ''}
                 onChange={(e) => {
-                  setData({ ...data, rightTable: e.target.value });
+                  setData({ ...data, rightTable: e.target.value, rightKey: '' }); // Clear rightKey when rightTable changes
                   if (validationErrors.rightTable) {
                     setValidationErrors({ ...validationErrors, rightTable: false });
                   }
@@ -228,51 +229,115 @@ export function EditableStageCard({ stage, tables, onSave, onCancel, onDelete }:
               <label style={{ fontSize: '11px', color: themeConfig.colors.textSecondary, display: 'block', marginBottom: '4px' }}>
                 Left Key <span style={{ color: themeConfig.colors.error }}>*</span>
               </label>
-              <input
-                type="text"
-                value={data.leftKey || ''}
-                onChange={(e) => {
-                  setData({ ...data, leftKey: e.target.value });
-                  if (validationErrors.leftKey) {
-                    setValidationErrors({ ...validationErrors, leftKey: false });
-                  }
-                }}
-                placeholder="Column name"
-                style={{
-                  width: '100%',
-                  padding: '6px',
-                  borderRadius: '4px',
-                  border: `1px solid ${validationErrors.leftKey ? themeConfig.colors.error : themeConfig.colors.border}`,
-                  background: themeConfig.colors.surfaceElevated,
-                  color: themeConfig.colors.text,
-                  fontSize: '12px'
-                }}
-              />
+              {data.leftTable ? (() => {
+                const selectedTable = tables.find(t => t.name === data.leftTable);
+                const columns = selectedTable?.schema?.map((col: any) => col.column_name || col.name) || [];
+                return (
+                  <select
+                    value={data.leftKey || ''}
+                    onChange={(e) => {
+                      setData({ ...data, leftKey: e.target.value });
+                      if (validationErrors.leftKey) {
+                        setValidationErrors({ ...validationErrors, leftKey: false });
+                      }
+                    }}
+                    style={{
+                      width: '100%',
+                      padding: '6px',
+                      borderRadius: '4px',
+                      border: `1px solid ${validationErrors.leftKey ? themeConfig.colors.error : themeConfig.colors.border}`,
+                      background: themeConfig.colors.surfaceElevated,
+                      color: themeConfig.colors.text,
+                      fontSize: '12px'
+                    }}
+                  >
+                    <option value="">Select column</option>
+                    {columns.map((col: string) => (
+                      <option key={col} value={col}>{col}</option>
+                    ))}
+                  </select>
+                );
+              })() : (
+                <input
+                  type="text"
+                  value={data.leftKey || ''}
+                  onChange={(e) => {
+                    setData({ ...data, leftKey: e.target.value });
+                    if (validationErrors.leftKey) {
+                      setValidationErrors({ ...validationErrors, leftKey: false });
+                    }
+                  }}
+                  placeholder="Select left table first"
+                  disabled
+                  style={{
+                    width: '100%',
+                    padding: '6px',
+                    borderRadius: '4px',
+                    border: `1px solid ${validationErrors.leftKey ? themeConfig.colors.error : themeConfig.colors.border}`,
+                    background: themeConfig.colors.surface,
+                    color: themeConfig.colors.textTertiary,
+                    fontSize: '12px',
+                    cursor: 'not-allowed'
+                  }}
+                />
+              )}
             </div>
             <div>
               <label style={{ fontSize: '11px', color: themeConfig.colors.textSecondary, display: 'block', marginBottom: '4px' }}>
                 Right Key <span style={{ color: themeConfig.colors.error }}>*</span>
               </label>
-              <input
-                type="text"
-                value={data.rightKey || ''}
-                onChange={(e) => {
-                  setData({ ...data, rightKey: e.target.value });
-                  if (validationErrors.rightKey) {
-                    setValidationErrors({ ...validationErrors, rightKey: false });
-                  }
-                }}
-                placeholder="Column name"
-                style={{
-                  width: '100%',
-                  padding: '6px',
-                  borderRadius: '4px',
-                  border: `1px solid ${validationErrors.rightKey ? themeConfig.colors.error : themeConfig.colors.border}`,
-                  background: themeConfig.colors.surfaceElevated,
-                  color: themeConfig.colors.text,
-                  fontSize: '12px'
-                }}
-              />
+              {data.rightTable ? (() => {
+                const selectedTable = tables.find(t => t.name === data.rightTable);
+                const columns = selectedTable?.schema?.map((col: any) => col.column_name || col.name) || [];
+                return (
+                  <select
+                    value={data.rightKey || ''}
+                    onChange={(e) => {
+                      setData({ ...data, rightKey: e.target.value });
+                      if (validationErrors.rightKey) {
+                        setValidationErrors({ ...validationErrors, rightKey: false });
+                      }
+                    }}
+                    style={{
+                      width: '100%',
+                      padding: '6px',
+                      borderRadius: '4px',
+                      border: `1px solid ${validationErrors.rightKey ? themeConfig.colors.error : themeConfig.colors.border}`,
+                      background: themeConfig.colors.surfaceElevated,
+                      color: themeConfig.colors.text,
+                      fontSize: '12px'
+                    }}
+                  >
+                    <option value="">Select column</option>
+                    {columns.map((col: string) => (
+                      <option key={col} value={col}>{col}</option>
+                    ))}
+                  </select>
+                );
+              })() : (
+                <input
+                  type="text"
+                  value={data.rightKey || ''}
+                  onChange={(e) => {
+                    setData({ ...data, rightKey: e.target.value });
+                    if (validationErrors.rightKey) {
+                      setValidationErrors({ ...validationErrors, rightKey: false });
+                    }
+                  }}
+                  placeholder="Select right table first"
+                  disabled
+                  style={{
+                    width: '100%',
+                    padding: '6px',
+                    borderRadius: '4px',
+                    border: `1px solid ${validationErrors.rightKey ? themeConfig.colors.error : themeConfig.colors.border}`,
+                    background: themeConfig.colors.surface,
+                    color: themeConfig.colors.textTertiary,
+                    fontSize: '12px',
+                    cursor: 'not-allowed'
+                  }}
+                />
+              )}
             </div>
           </div>
         );
@@ -287,7 +352,7 @@ export function EditableStageCard({ stage, tables, onSave, onCancel, onDelete }:
               <select
                 value={data.table || ''}
                 onChange={(e) => {
-                  setData({ ...data, table: e.target.value });
+                  setData({ ...data, table: e.target.value, column: '' }); // Clear column when table changes
                   if (validationErrors.table) {
                     setValidationErrors({ ...validationErrors, table: false });
                   }
@@ -310,26 +375,58 @@ export function EditableStageCard({ stage, tables, onSave, onCancel, onDelete }:
               <label style={{ fontSize: '11px', color: themeConfig.colors.textSecondary, display: 'block', marginBottom: '4px' }}>
                 Column <span style={{ color: themeConfig.colors.error }}>*</span>
               </label>
-              <input
-                type="text"
-                value={data.column || ''}
-                onChange={(e) => {
-                  setData({ ...data, column: e.target.value });
-                  if (validationErrors.column) {
-                    setValidationErrors({ ...validationErrors, column: false });
-                  }
-                }}
-                placeholder="Column name"
-                style={{
-                  width: '100%',
-                  padding: '6px',
-                  borderRadius: '4px',
-                  border: `1px solid ${validationErrors.column ? themeConfig.colors.error : themeConfig.colors.border}`,
-                  background: themeConfig.colors.surfaceElevated,
-                  color: themeConfig.colors.text,
-                  fontSize: '12px'
-                }}
-              />
+              {data.table ? (() => {
+                const selectedTable = tables.find(t => t.name === data.table);
+                const columns = selectedTable?.schema?.map((col: any) => col.column_name || col.name) || [];
+                return (
+                  <select
+                    value={data.column || ''}
+                    onChange={(e) => {
+                      setData({ ...data, column: e.target.value });
+                      if (validationErrors.column) {
+                        setValidationErrors({ ...validationErrors, column: false });
+                      }
+                    }}
+                    style={{
+                      width: '100%',
+                      padding: '6px',
+                      borderRadius: '4px',
+                      border: `1px solid ${validationErrors.column ? themeConfig.colors.error : themeConfig.colors.border}`,
+                      background: themeConfig.colors.surfaceElevated,
+                      color: themeConfig.colors.text,
+                      fontSize: '12px'
+                    }}
+                  >
+                    <option value="">Select column</option>
+                    {columns.map((col: string) => (
+                      <option key={col} value={col}>{col}</option>
+                    ))}
+                  </select>
+                );
+              })() : (
+                <input
+                  type="text"
+                  value={data.column || ''}
+                  onChange={(e) => {
+                    setData({ ...data, column: e.target.value });
+                    if (validationErrors.column) {
+                      setValidationErrors({ ...validationErrors, column: false });
+                    }
+                  }}
+                  placeholder="Select table first"
+                  disabled
+                  style={{
+                    width: '100%',
+                    padding: '6px',
+                    borderRadius: '4px',
+                    border: `1px solid ${validationErrors.column ? themeConfig.colors.error : themeConfig.colors.border}`,
+                    background: themeConfig.colors.surface,
+                    color: themeConfig.colors.textTertiary,
+                    fontSize: '12px',
+                    cursor: 'not-allowed'
+                  }}
+                />
+              )}
             </div>
             <div>
               <label style={{ fontSize: '11px', color: themeConfig.colors.textSecondary, display: 'block', marginBottom: '4px' }}>
@@ -445,15 +542,29 @@ export function EditableStageCard({ stage, tables, onSave, onCancel, onDelete }:
   };
 
   return (
-    <div style={{
-      background: themeConfig.colors.surfaceElevated,
-      border: `2px solid ${color}`,
-      borderRadius: '8px',
-      padding: '12px',
-      position: 'relative',
-      zIndex: 1,
-      boxShadow: themeConfig.shadows.sm
-    }}>
+    <div 
+      style={{
+        background: themeConfig.colors.surfaceElevated,
+        border: `2px solid ${color}`,
+        borderRadius: '8px',
+        padding: '12px',
+        position: 'relative',
+        zIndex: 1,
+        boxShadow: themeConfig.shadows.sm
+      }}
+      onMouseDown={(e) => {
+        // Prevent node drag when clicking on form elements
+        const target = e.target as HTMLElement;
+        const isFormElement = target.tagName === 'INPUT' || 
+                             target.tagName === 'SELECT' || 
+                             target.tagName === 'TEXTAREA' ||
+                             target.tagName === 'BUTTON' ||
+                             target.closest('button') !== null;
+        if (isFormElement) {
+          e.stopPropagation();
+        }
+      }}
+    >
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
         <div style={{
           width: '24px',
@@ -469,152 +580,118 @@ export function EditableStageCard({ stage, tables, onSave, onCancel, onDelete }:
           {getStageIcon(type)}
         </div>
         <div style={{ flex: 1 }}>
-          {isEditing ? (
-            <>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                <div>
-                  <label style={{ fontSize: '11px', color: themeConfig.colors.textSecondary, display: 'block', marginBottom: '4px' }}>
-                    Type
-                  </label>
-                  <select
-                    value={type}
-                    onChange={(e) => {
-                      setType(e.target.value as TransformationStage['type']);
-                      setData({});
-                    }}
-                    style={{
-                      width: '100%',
-                      padding: '6px',
-                      borderRadius: '4px',
-                      border: `1px solid ${themeConfig.colors.border}`,
-                      background: themeConfig.colors.surfaceElevated,
-                      color: themeConfig.colors.text,
-                      fontSize: '12px'
-                    }}
-                  >
-                    <option value="JOIN">JOIN</option>
-                    <option value="UNION">UNION</option>
-                    <option value="FILTER">FILTER</option>
-                    <option value="GROUP">GROUP</option>
-                    <option value="SELECT">SELECT</option>
-                    <option value="SORT">SORT</option>
-                  </select>
-                </div>
-                <div>
-                  <label style={{ fontSize: '11px', color: themeConfig.colors.textSecondary, display: 'block', marginBottom: '4px' }}>
-                    Description <span style={{ fontSize: '10px', color: themeConfig.colors.textTertiary }}>(optional)</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={description}
-                    onChange={(e) => setDescription(e.target.value)}
-                    placeholder="Describe this transformation (optional)"
-                    style={{
-                      width: '100%',
-                      padding: '6px',
-                      borderRadius: '4px',
-                      border: `1px solid ${themeConfig.colors.border}`,
-                      background: themeConfig.colors.surfaceElevated,
-                      color: themeConfig.colors.text,
-                      fontSize: '12px'
-                    }}
-                  />
-                </div>
-                {renderTypeSpecificFields()}
-                <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
-                  <button
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      handleSave();
-                    }}
-                    type="button"
-                    style={{
-                      padding: '6px 12px',
-                      background: themeConfig.colors.primary,
-                      color: 'white',
-                      border: 'none',
-                      borderRadius: '4px',
-                      cursor: 'pointer',
-                      fontSize: '12px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '4px',
-                      fontWeight: '500'
-                    }}
-                  >
-                    <Save size={12} />
-                    Save
-                  </button>
-                  {stage && onDelete && (
-                    <button
-                      onClick={() => {
-                        if (stage.id && onDelete) {
-                          onDelete(stage.id);
-                        }
-                      }}
-                      style={{
-                        padding: '6px 12px',
-                        background: themeConfig.colors.error,
-                        color: 'white',
-                        border: 'none',
-                        borderRadius: '4px',
-                        cursor: 'pointer',
-                        fontSize: '12px'
-                      }}
-                    >
-                      Delete
-                    </button>
-                  )}
-                  <button
-                    onClick={handleCancel}
-                    style={{
-                      padding: '6px 12px',
-                      background: themeConfig.colors.surface,
-                      color: themeConfig.colors.text,
-                      border: `1px solid ${themeConfig.colors.border}`,
-                      borderRadius: '4px',
-                      cursor: 'pointer',
-                      fontSize: '12px'
-                    }}
-                  >
-                    <X size={12} />
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            </>
-          ) : (
-            <>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                <strong style={{ color: color, fontSize: '14px' }}>{type}</strong>
-                <span style={{ fontSize: '11px', color: themeConfig.colors.textTertiary, marginLeft: 'auto' }}>
-                  {stage && new Date(stage.timestamp).toLocaleTimeString()}
-                </span>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <div>
+              <label style={{ fontSize: '11px', color: themeConfig.colors.textSecondary, display: 'block', marginBottom: '4px' }}>
+                Type
+              </label>
+              <select
+                value={type}
+                onChange={(e) => {
+                  setType(e.target.value as TransformationStage['type']);
+                  setData({});
+                }}
+                style={{
+                  width: '100%',
+                  padding: '6px',
+                  borderRadius: '4px',
+                  border: `1px solid ${themeConfig.colors.border}`,
+                  background: themeConfig.colors.surfaceElevated,
+                  color: themeConfig.colors.text,
+                  fontSize: '12px'
+                }}
+              >
+                <option value="JOIN">JOIN</option>
+                <option value="UNION">UNION</option>
+                <option value="FILTER">FILTER</option>
+                <option value="GROUP">GROUP</option>
+                <option value="SELECT">SELECT</option>
+                <option value="SORT">SORT</option>
+              </select>
+            </div>
+            <div>
+              <label style={{ fontSize: '11px', color: themeConfig.colors.textSecondary, display: 'block', marginBottom: '4px' }}>
+                Description <span style={{ fontSize: '10px', color: themeConfig.colors.textTertiary }}>(optional)</span>
+              </label>
+              <input
+                type="text"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="Describe this transformation (optional)"
+                style={{
+                  width: '100%',
+                  padding: '6px',
+                  borderRadius: '4px',
+                  border: `1px solid ${themeConfig.colors.border}`,
+                  background: themeConfig.colors.surfaceElevated,
+                  color: themeConfig.colors.text,
+                  fontSize: '12px'
+                }}
+              />
+            </div>
+            {renderTypeSpecificFields()}
+            <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
+              <button
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  handleSave();
+                }}
+                type="button"
+                style={{
+                  padding: '6px 12px',
+                  background: themeConfig.colors.primary,
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  fontSize: '12px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  fontWeight: '500'
+                }}
+              >
+                <Save size={12} />
+                Save
+              </button>
+              {stage && onDelete && (
                 <button
-                  onClick={() => setIsEditing(true)}
-                  style={{
-                    padding: '4px',
-                    background: 'transparent',
-                    border: 'none',
-                    cursor: 'pointer',
-                    color: themeConfig.colors.textSecondary,
-                    display: 'flex',
-                    alignItems: 'center',
-                    transition: 'color 0.2s'
+                  onClick={() => {
+                    if (stage.id && onDelete) {
+                      onDelete(stage.id);
+                    }
                   }}
-                  onMouseEnter={(e) => e.currentTarget.style.color = themeConfig.colors.primary}
-                  onMouseLeave={(e) => e.currentTarget.style.color = themeConfig.colors.textSecondary}
-                  title="Edit stage"
+                  style={{
+                    padding: '6px 12px',
+                    background: themeConfig.colors.error,
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '4px',
+                    cursor: 'pointer',
+                    fontSize: '12px'
+                  }}
                 >
-                  <Edit2 size={14} />
+                  Delete
                 </button>
-              </div>
-              <div style={{ fontSize: '13px', color: themeConfig.colors.textSecondary }}>
-                {description || 'No description'}
-              </div>
-            </>
-          )}
+              )}
+              <button
+                onClick={handleCancel}
+                style={{
+                  padding: '6px 12px',
+                  background: themeConfig.colors.surface,
+                  color: themeConfig.colors.text,
+                  border: `1px solid ${themeConfig.colors.border}`,
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  fontSize: '12px'
+                }}
+              >
+                <X size={12} />
+                Cancel
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

@@ -1,4 +1,4 @@
-import { useMemo, useCallback, useEffect, useState, useRef } from 'react';
+import { useMemo, useCallback, useEffect, useState, useRef, forwardRef, useImperativeHandle } from 'react';
 import ReactFlow, {
   type Node,
   type Edge,
@@ -7,6 +7,7 @@ import ReactFlow, {
   useNodesState,
   useEdgesState,
   useReactFlow,
+  ReactFlowProvider,
   ConnectionMode,
   MarkerType,
   Position,
@@ -27,7 +28,7 @@ interface StageNode {
 
 interface Props {
   stages: TransformationStage[];
-  tables: Array<{ id: string; name: string }>;
+  tables: Array<{ id: string; name: string; schema?: any[] }>;
   onStageEdit: (stage: TransformationStage) => Promise<void> | void;
   onStageStartEdit: (stageId: string) => void;
   onStageDelete: (stageId: string) => void;
@@ -36,6 +37,8 @@ interface Props {
   newStage: TransformationStage | null;
   stageToTableMap?: Map<string, string>; // Maps stage ID to result table ID
   onShowTable?: (tableId: string) => void; // Callback to show a table
+  onExportJSON?: () => void;
+  onExportImage?: () => void;
 }
 
 // Build dependency graph
@@ -108,12 +111,74 @@ function buildStageGraph(stages: TransformationStage[]): Map<string, StageNode> 
 function StageNodeComponent({ data }: { data: any }) {
   const { themeConfig } = useTheme();
   const { stage, isEditing, hasMultipleInputs, onEdit, onDelete, inputCount, stageIndex, stageToTableMap, onShowTable, tables } = data;
+  const editButtonRef = useRef<HTMLDivElement>(null);
+  
+  // Use native event listener in capture phase to fire before ReactFlow
+  useEffect(() => {
+    const button = editButtonRef.current;
+    if (!button || !onEdit || !stage?.id || isEditing) return;
+    
+    const handleMouseDown = (e: MouseEvent) => {
+      // Stop ALL propagation immediately in capture phase
+      e.stopImmediatePropagation();
+      e.stopPropagation();
+      e.preventDefault();
+      
+      // Call edit function immediately
+      if (onEdit && stage?.id) {
+        onEdit(stage.id);
+      }
+    };
+    
+    // Attach in capture phase (true) to fire BEFORE ReactFlow's handlers
+    button.addEventListener('mousedown', handleMouseDown, { capture: true, passive: false });
+    
+    return () => {
+      button.removeEventListener('mousedown', handleMouseDown, { capture: true } as any);
+    };
+  }, [onEdit, stage?.id, isEditing]);
+  
+  // Determine number of source handles needed (for nodes with multiple outputs)
+  const sourceHandleCount = 1; // Most nodes have one output
+  // Determine number of target handles needed (for nodes with multiple inputs like JOIN/UNION)
+  const targetHandleCount = hasMultipleInputs && inputCount > 1 ? inputCount : 1;
   
   if (isEditing) {
     return (
       <div style={{ width: '280px', position: 'relative' }}>
-        <Handle type="target" position={Position.Top} id="target-top" style={{ visibility: 'hidden' }} />
-        <Handle type="target" position={Position.Left} id="target-left" style={{ top: '50%', visibility: 'hidden' }} />
+        {/* Target handles - same structure as view mode to maintain edge connections */}
+        {targetHandleCount > 1 ? (
+          Array.from({ length: targetHandleCount }).map((_, idx) => (
+            <>
+              <Handle
+                key={`target-top-${idx}`}
+                type="target"
+                position={Position.Top}
+                id={`target-top-${idx}`}
+                style={{
+                  left: `${50 + (idx - (targetHandleCount - 1) / 2) * 15}%`,
+                  visibility: 'hidden'
+                }}
+              />
+              <Handle
+                key={`target-left-${idx}`}
+                type="target"
+                position={Position.Left}
+                id={`target-left-${idx}`}
+                style={{
+                  top: `${30 + idx * 20}%`,
+                  visibility: 'hidden'
+                }}
+              />
+            </>
+          ))
+        ) : (
+          <>
+            <Handle type="target" position={Position.Top} id="target-top" style={{ visibility: 'hidden' }} />
+            <Handle type="target" position={Position.Left} id="target-left" style={{ top: '50%', visibility: 'hidden' }} />
+          </>
+        )}
+        
         <EditableStageCard
           stage={stage}
           tables={data.tables}
@@ -121,16 +186,42 @@ function StageNodeComponent({ data }: { data: any }) {
           onCancel={data.onCancel}
           onDelete={onDelete}
         />
-        <Handle type="source" position={Position.Bottom} id="source-bottom" style={{ visibility: 'hidden' }} />
-        <Handle type="source" position={Position.Right} id="source-right" style={{ top: '50%', visibility: 'hidden' }} />
+        
+        {/* Source handles - same structure as view mode */}
+        {sourceHandleCount > 1 ? (
+          Array.from({ length: sourceHandleCount }).map((_, idx) => (
+            <>
+              <Handle
+                key={`source-bottom-${idx}`}
+                type="source"
+                position={Position.Bottom}
+                id={`source-bottom-${idx}`}
+                style={{
+                  left: `${50 + (idx - (sourceHandleCount - 1) / 2) * 15}%`,
+                  visibility: 'hidden'
+                }}
+              />
+              <Handle
+                key={`source-right-${idx}`}
+                type="source"
+                position={Position.Right}
+                id={`source-right-${idx}`}
+                style={{
+                  top: `${50 + (idx - (sourceHandleCount - 1) / 2) * 20}%`,
+                  visibility: 'hidden'
+                }}
+              />
+            </>
+          ))
+        ) : (
+          <>
+            <Handle type="source" position={Position.Bottom} id="source-bottom" style={{ visibility: 'hidden' }} />
+            <Handle type="source" position={Position.Right} id="source-right" style={{ top: '50%', visibility: 'hidden' }} />
+          </>
+        )}
       </div>
     );
   }
-  
-  // Determine number of source handles needed (for nodes with multiple outputs)
-  const sourceHandleCount = 1; // Most nodes have one output
-  // Determine number of target handles needed (for nodes with multiple inputs like JOIN/UNION)
-  const targetHandleCount = hasMultipleInputs && inputCount > 1 ? inputCount : 1;
   
   return (
     <div style={{
@@ -318,28 +409,56 @@ function StageNodeComponent({ data }: { data: any }) {
                   Table
                 </button>
               )}
-              <button
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  onEdit(stage.id);
-                }}
-                style={{
-                  padding: '4px',
-                  background: 'transparent',
-                  border: 'none',
-                  cursor: 'pointer',
-                  color: themeConfig.colors.textSecondary,
-                  display: 'flex',
-                  alignItems: 'center'
-                }}
-                title="Edit stage"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                  <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-                </svg>
-              </button>
+              {stage.type !== 'LOAD' && onEdit && (
+                <div
+                  ref={editButtonRef}
+                  data-edit-button="true"
+                  onMouseDown={(e) => {
+                    // Also handle in React to ensure it works
+                    e.stopPropagation();
+                    if (e.nativeEvent) {
+                      e.nativeEvent.stopImmediatePropagation();
+                    }
+                    e.preventDefault();
+                    // Call edit function immediately
+                    if (onEdit && stage?.id) {
+                      onEdit(stage.id);
+                    }
+                  }}
+                  style={{
+                    padding: '4px',
+                    background: 'transparent',
+                    border: 'none',
+                    cursor: 'pointer',
+                    color: themeConfig.colors.textSecondary,
+                    display: 'flex',
+                    alignItems: 'center',
+                    pointerEvents: 'auto',
+                    zIndex: 1000,
+                    position: 'relative',
+                    // Prevent drag on this element
+                    userSelect: 'none',
+                    WebkitUserSelect: 'none'
+                  }}
+                  title="Edit stage"
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      if (onEdit && stage?.id) {
+                        onEdit(stage.id);
+                      }
+                    }
+                  }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" pointerEvents="none">
+                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                  </svg>
+                </div>
+              )}
             </div>
           </div>
           <div style={{ 
@@ -408,19 +527,29 @@ function AutoFitView({ stagesCount, editingStageId }: { stagesCount: number; edi
   return null;
 }
 
-export function StageGraphFlow({ 
-  stages, 
-  tables, 
-  onStageEdit, 
-  onStageStartEdit, 
-  onStageDelete, 
+// Inner component that uses useReactFlow hook (must be inside ReactFlowProvider)
+function StageGraphFlowInner({
+  stages,
+  tables,
+  onStageEdit,
+  onStageStartEdit,
+  onStageDelete,
   onStageAdd,
   editingStageId,
   newStage,
   stageToTableMap,
-  onShowTable
-}: Props) {
+  onShowTable,
+  onExportJSON,
+  onExportImage,
+  onRefReady
+}: Props & { onRefReady: (instance: any) => void }) {
   const { themeConfig } = useTheme();
+  const reactFlowInstance = useReactFlow();
+  
+  // Expose ReactFlow instance via callback
+  useEffect(() => {
+    onRefReady(reactFlowInstance);
+  }, [reactFlowInstance, onRefReady]);
   
   // Canvas height resizing state
   const [canvasHeight, setCanvasHeight] = useState(() => {
@@ -480,7 +609,7 @@ export function StageGraphFlow({
           isEditing,
           hasMultipleInputs,
           inputCount: node.inputs.length,
-          stageIndex: index,
+          stageIndex: index + 1,
           stageToTableMap,
           onShowTable,
           tables,
@@ -493,7 +622,7 @@ export function StageGraphFlow({
           onEdit: onStageStartEdit,
           onDelete: onStageDelete,
         },
-        draggable: !isEditing,
+        draggable: true, // All cards are draggable, even when editing
       });
     });
     
@@ -606,28 +735,80 @@ export function StageGraphFlow({
     });
     
     return { initialNodes: nodes, initialEdges: edges };
-  }, [stages, graph, editingStageId, tables, onStageEdit, onStageStartEdit, onStageDelete, themeConfig.colors.border]);
+  }, [stages, graph, editingStageId, tables, onStageEdit, onStageStartEdit, onStageDelete, stageToTableMap, onShowTable, themeConfig.colors.border]);
   
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
+  
+  // Handle node drag start - prevent drag if clicking on edit button (backup)
+  const onNodeDragStart = useCallback((event: React.MouseEvent, node: Node) => {
+    const target = event.target as HTMLElement;
+    // If drag started from edit button, prevent it
+    if (target.closest('[data-edit-button="true"]')) {
+      event.preventDefault();
+      event.stopPropagation();
+      // Trigger edit instead
+      const stage = node.data?.stage;
+      if (stage && stage.type !== 'LOAD' && onStageStartEdit) {
+        onStageStartEdit(stage.id);
+      }
+    }
+  }, [onStageStartEdit]);
+
+  // Handle node click to trigger edit mode (only for non-LOAD stages)
+  const onNodeClick = useCallback((event: React.MouseEvent, node: Node) => {
+    // Only trigger edit if:
+    // 1. The stage is not LOAD type
+    // 2. The stage is not already being edited
+    // 3. The click is not on an interactive element (button, etc.)
+    const stage = node.data?.stage;
+    if (stage && stage.type !== 'LOAD' && editingStageId !== stage.id) {
+      // Check if click target is an interactive element
+      const target = event.target as HTMLElement;
+      // Check if clicked element or any parent is a button, div with role="button", input, select, or textarea
+      const isInteractiveElement = target.closest('button') !== null || 
+                                    target.closest('[role="button"]') !== null ||
+                                    target.closest('[data-edit-button="true"]') !== null ||
+                                    target.closest('input') !== null || 
+                                    target.closest('select') !== null || 
+                                    target.closest('textarea') !== null;
+      // Also check if the click was on an SVG inside a button or div with role="button"
+      const isSVG = target.tagName === 'svg' || target.closest('svg');
+      const isButtonSVG = isSVG && (target.closest('button') !== null || target.closest('[role="button"]') !== null || target.closest('[data-edit-button="true"]') !== null);
+      
+      // Don't trigger edit if clicking on any interactive element
+      if (!isInteractiveElement && !isButtonSVG) {
+        // Prevent ReactFlow from selecting the node
+        event.preventDefault();
+        event.stopPropagation();
+        onStageStartEdit(stage.id);
+      }
+    }
+  }, [editingStageId, onStageStartEdit]);
   
   // Update nodes when stages change
   useEffect(() => {
     setNodes(prevNodes => {
       return initialNodes.map(node => {
         const existingNode = prevNodes.find(n => n.id === node.id);
+        const isEditing = editingStageId === node.id;
         if (existingNode) {
           // Preserve position if node exists
           return {
             ...node,
             position: existingNode.position,
+            draggable: true, // All cards are draggable, even when editing
             data: {
               ...node.data,
-              isEditing: editingStageId === node.id,
+              isEditing,
             },
           };
         }
-        return node;
+        // For new nodes, all are draggable
+        return {
+          ...node,
+          draggable: true, // All cards are draggable, even when editing
+        };
       });
     });
   }, [initialNodes, editingStageId, setNodes]);
@@ -699,7 +880,7 @@ export function StageGraphFlow({
   
   return (
     <div style={{
-      padding: '20px',
+      padding: '20px 20px 0px 20px',
       background: themeConfig.colors.surface,
       borderRadius: '8px',
       border: `1px solid ${themeConfig.colors.border}`,
@@ -707,21 +888,104 @@ export function StageGraphFlow({
       minHeight: '400px',
       position: 'relative'
     }}>
-      <h3 style={{ 
-        margin: '0 0 20px 0', 
-        fontSize: '16px', 
+      <div style={{ 
         display: 'flex', 
+        justifyContent: 'space-between', 
         alignItems: 'center', 
-        gap: '8px',
-        color: themeConfig.colors.text
+        marginBottom: '20px' 
       }}>
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <path d="M12 2L2 7l10 5 10-5-10-5z" />
-          <path d="M2 17l10 5 10-5" />
-          <path d="M2 12l10 5 10-5" />
-        </svg>
-        Transformation Pipeline ({stages.length} stages)
-      </h3>
+        <h3 style={{ 
+          margin: 0, 
+          fontSize: '16px', 
+          display: 'flex', 
+          alignItems: 'center', 
+          gap: '8px',
+          color: themeConfig.colors.text
+        }}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M12 2L2 7l10 5 10-5-10-5z" />
+            <path d="M2 17l10 5 10-5" />
+            <path d="M2 12l10 5 10-5" />
+          </svg>
+          Transformation Pipeline ({stages.length} stages)
+        </h3>
+        {stages.length > 0 && (onExportJSON || onExportImage) && (
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            {onExportJSON && (
+              <button
+                onClick={onExportJSON}
+                style={{
+                  padding: '6px 12px',
+                  background: themeConfig.colors.surfaceElevated,
+                  border: `1px solid ${themeConfig.colors.border}`,
+                  borderRadius: '6px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  color: themeConfig.colors.text,
+                  fontSize: '13px',
+                  transition: 'all 0.2s'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = themeConfig.colors.primary;
+                  e.currentTarget.style.color = 'white';
+                  e.currentTarget.style.borderColor = themeConfig.colors.primary;
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = themeConfig.colors.surfaceElevated;
+                  e.currentTarget.style.color = themeConfig.colors.text;
+                  e.currentTarget.style.borderColor = themeConfig.colors.border;
+                }}
+                title="Export to JSON"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+                Export JSON
+              </button>
+            )}
+            {onExportImage && (
+              <button
+                onClick={onExportImage}
+                style={{
+                  padding: '6px 12px',
+                  background: themeConfig.colors.surfaceElevated,
+                  border: `1px solid ${themeConfig.colors.border}`,
+                  borderRadius: '6px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  color: themeConfig.colors.text,
+                  fontSize: '13px',
+                  transition: 'all 0.2s'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = themeConfig.colors.primary;
+                  e.currentTarget.style.color = 'white';
+                  e.currentTarget.style.borderColor = themeConfig.colors.primary;
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = themeConfig.colors.surfaceElevated;
+                  e.currentTarget.style.color = themeConfig.colors.text;
+                  e.currentTarget.style.borderColor = themeConfig.colors.border;
+                }}
+                title="Export to Image"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                  <circle cx="8.5" cy="8.5" r="1.5" />
+                  <polyline points="21 15 16 10 5 21" />
+                </svg>
+                Export Image
+              </button>
+            )}
+          </div>
+        )}
+      </div>
       
       {stages.length === 0 ? (
         <div style={{ 
@@ -756,15 +1020,18 @@ export function StageGraphFlow({
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
               onEdgeUpdate={onEdgeUpdate}
+              onNodeClick={onNodeClick}
+              onNodeDragStart={onNodeDragStart}
               nodeTypes={nodeTypes}
               connectionMode={ConnectionMode.Loose}
               fitView
               fitViewOptions={{ padding: 0.2, maxZoom: 1.5 }}
-              nodesDraggable={true}
+              nodesDraggable={true} // Individual node draggable state is controlled per node
+              nodeDragThreshold={5} // Require 5px movement before starting drag - helps prevent accidental drags
               nodesConnectable={false}
               edgesUpdatable={false}
               edgesFocusable={false}
-              elementsSelectable={true}
+              elementsSelectable={false} // Disable selection to prevent interference with edit
               panOnDrag={true} // Allow panning with left mouse button (when not dragging nodes)
               panOnScroll={true} // Allow panning with scroll wheel + modifier key
               zoomOnScroll={true}
@@ -784,88 +1051,109 @@ export function StageGraphFlow({
                 }}
               />
               <AutoFitView stagesCount={stages.length} editingStageId={editingStageId} />
+              
+              {/* Add Stage button - positioned at bottom right inside canvas */}
+              <div style={{
+                position: 'absolute',
+                bottom: '16px',
+                right: '16px',
+                zIndex: 1000,
+                pointerEvents: 'auto'
+              }}>
+                <button
+                  onClick={onStageAdd}
+                  style={{
+                    padding: '14px 24px',
+                    background: themeConfig.colors.surfaceElevated,
+                    color: themeConfig.colors.primary,
+                    border: `1px solid ${themeConfig.colors.border}`,
+                    borderRadius: '8px',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '8px',
+                    fontSize: '14px',
+                    fontWeight: '600',
+                    transition: 'all 0.2s',
+                    boxShadow: themeConfig.shadows.md
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = themeConfig.colors.primary;
+                    e.currentTarget.style.color = 'white';
+                    e.currentTarget.style.borderColor = themeConfig.colors.primary;
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = themeConfig.colors.surfaceElevated;
+                    e.currentTarget.style.color = themeConfig.colors.primary;
+                    e.currentTarget.style.borderColor = themeConfig.colors.border;
+                  }}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <line x1="12" y1="5" x2="12" y2="19" />
+                    <line x1="5" y1="12" x2="19" y2="12" />
+                  </svg>
+                  Add Stage
+                </button>
+              </div>
             </ReactFlow>
-          </div>
-          
-          {/* Add Stage button container - fixed at bottom */}
-          <div style={{ 
-            position: 'relative',
-            marginTop: '12px',
-            flexShrink: 0
-          }}>
-            <button
-              onClick={onStageAdd}
-              style={{
-                width: '100%',
-                padding: '10px',
-                background: themeConfig.colors.surface,
-                color: themeConfig.colors.primary,
-                border: `1px dashed ${themeConfig.colors.border}`,
-                borderRadius: '6px',
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '6px',
-                fontSize: '13px',
-                fontWeight: '500',
-                transition: 'all 0.2s',
-                position: 'relative',
-                zIndex: 1
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = themeConfig.colors.surfaceElevated;
-                e.currentTarget.style.borderColor = themeConfig.colors.primary;
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = themeConfig.colors.surface;
-                e.currentTarget.style.borderColor = themeConfig.colors.border;
-              }}
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <line x1="12" y1="5" x2="12" y2="19" />
-                <line x1="5" y1="12" x2="19" y2="12" />
-              </svg>
-              Add Stage
-            </button>
-            
           </div>
           
         </div>
       )}
       
-      {/* Height resize handle - at the bottom border, outside padding */}
+      {/* Height resize handle - sticky at bottom, below all content */}
       {stages.length > 0 && (
         <div
           onMouseDown={handleHeightResizeStart}
           style={{
-            position: 'absolute',
-            bottom: 0,
-            left: '-20px',
-            right: '-20px',
-            height: '4px',
+            position: 'sticky',
+            bottom: '0px',
+            left: '0',
+            right: '0',
+            marginLeft: '-20px',
+            marginRight: '-20px',
+            marginTop: '16px',
+            height: '32px', // Interactive area for easy dragging
             cursor: 'row-resize',
-            background: 'transparent',
-            zIndex: 10,
+            background: themeConfig.colors.surface,
+            zIndex: 100,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            pointerEvents: 'auto'
           }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = 'rgba(59, 130, 246, 0.3)';
-          }}
-          onMouseLeave={(e) => {
-            if (!isResizingHeight) {
-              e.currentTarget.style.background = 'transparent';
-            }
-          }}
+          title="Drag to resize canvas height"
         >
+          {/* Thin grey line as visual indicator */}
           <div style={{
             position: 'absolute',
-            top: 0,
-            left: 0,
-            right: 0,
-            height: '4px',
-            background: isResizingHeight ? 'rgba(59, 130, 246, 0.5)' : 'transparent',
-            transition: isResizingHeight ? 'none' : 'background 0.2s'
+            top: '0',
+            left: '20px',
+            right: '20px',
+            height: '1px',
+            background: themeConfig.colors.border,
+            transition: 'background 0.2s'
           }} />
+          
+          {/* Small drag handle indicator */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '2px',
+            padding: '4px 8px',
+            background: isResizingHeight ? themeConfig.colors.primary + '20' : themeConfig.colors.surface,
+            border: `1px solid ${isResizingHeight ? themeConfig.colors.primary : themeConfig.colors.border}`,
+            borderRadius: '4px',
+            transition: 'all 0.2s',
+            position: 'relative',
+            zIndex: 1
+          }}>
+            <svg width="16" height="6" viewBox="0 0 16 6" fill="none" stroke={themeConfig.colors.textTertiary} strokeWidth="1.5" strokeLinecap="round">
+              <line x1="2" y1="2" x2="14" y2="2" />
+              <line x1="2" y1="4" x2="14" y2="4" />
+            </svg>
+          </div>
         </div>
       )}
       
@@ -925,4 +1213,24 @@ export function StageGraphFlow({
     </div>
   );
 }
+
+// Outer component that wraps with ReactFlowProvider
+export const StageGraphFlow = forwardRef<{ getReactFlowInstance: () => any }, Props>((props, ref) => {
+  const reactFlowInstanceRef = useRef<any>(null);
+  
+  const handleRefReady = useCallback((instance: any) => {
+    reactFlowInstanceRef.current = instance;
+  }, []);
+  
+  // Expose ReactFlow instance via ref
+  useImperativeHandle(ref, () => ({
+    getReactFlowInstance: () => reactFlowInstanceRef.current
+  }), []);
+  
+  return (
+    <ReactFlowProvider>
+      <StageGraphFlowInner {...props} onRefReady={handleRefReady} />
+    </ReactFlowProvider>
+  );
+});
 

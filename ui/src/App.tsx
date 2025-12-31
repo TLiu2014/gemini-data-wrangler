@@ -1,4 +1,4 @@
-import { useState, useEffect, Component } from 'react';
+import { useState, useEffect, Component, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { initDB } from './db';
 import { SmartTransform } from './SmartTransform';
@@ -18,6 +18,8 @@ import { useDropzone } from 'react-dropzone';
 import * as duckdb from '@duckdb/duckdb-wasm';
 import { mockData, mockSchema } from './mockData';
 import type { TableData, TransformationStage } from './types';
+import sampleStagesData from './sampleStages.json';
+import html2canvas from 'html2canvas';
 
 // ============================================================================
 // CONFIGURATION: Sample Data Preloading
@@ -81,6 +83,8 @@ function App() {
   });
   // Map stage ID to result table ID
   const [stageToTableMap, setStageToTableMap] = useState<Map<string, string>>(new Map());
+  // Export preview state
+  const [exportPreview, setExportPreview] = useState<{ type: 'json' | 'image'; data: string | null } | null>(null);
 
   // Get current active table data
   const activeTable = tables.find(t => t.id === activeTableId);
@@ -95,6 +99,8 @@ function App() {
       { name: 'customers.csv', path: '/sampleData/customers.csv' },
       { name: 'orders.csv', path: '/sampleData/orders.csv' }
     ];
+    
+    const loadedTables: { name: string; id: string }[] = [];
     
     for (const fileInfo of sampleFiles) {
       try {
@@ -149,6 +155,9 @@ function App() {
         // Add to tables list
         setTables(prev => [...prev, newTable]);
         
+        // Track loaded table
+        loadedTables.push({ name: tableName, id: tableId });
+        
         // Set as active if it's the first table
         setActiveTableId(prev => prev || tableId);
         
@@ -169,7 +178,79 @@ function App() {
       }
     }
     
-    setStatus('Sample data loaded. Ready for transformations.');
+    // After tables are loaded, load and execute sample stages from JSON
+    if (loadedTables.length === 2) {
+      // Find customers and orders tables
+      const customersTable = loadedTables.find(t => t.name.includes('customers'));
+      const ordersTable = loadedTables.find(t => t.name.includes('orders'));
+      
+      if (customersTable && ordersTable) {
+        // Load sample stages from JSON and execute them
+        const sampleStages: TransformationStage[] = sampleStagesData.map(stageData => ({
+          ...stageData,
+          id: `stage_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+          timestamp: new Date(),
+          data: {
+            ...stageData.data,
+            leftTable: stageData.data.leftTable === 'orders' ? ordersTable.name : stageData.data.leftTable,
+            rightTable: stageData.data.rightTable === 'customers' ? customersTable.name : stageData.data.rightTable
+          }
+        })) as TransformationStage[];
+        
+        // Execute each sample stage to create result tables
+        for (const sampleStage of sampleStages) {
+          try {
+            // Generate SQL from the stage
+            const sql = generateSQLFromStage(sampleStage, ordersTable.name);
+            
+            // Get stage index for table naming
+            // Account for the LOAD stages that were just added (2 load stages + current sample stage index)
+            const stageIndex = loadedTables.length + sampleStages.indexOf(sampleStage);
+            const stageTypeLower = sampleStage.type.toLowerCase();
+            const resultTableName = `result_stage_${stageIndex}_${stageTypeLower}`;
+            
+            // Execute the transformation and create result table
+            await conn.query(`CREATE OR REPLACE TABLE ${resultTableName} AS ${sql}`);
+            
+            // Get the result data
+            const result = await conn.query(`SELECT * FROM ${resultTableName} LIMIT 1000`);
+            const resultRows = result.toArray().map(r => r.toJSON());
+            const schemaRes = await conn.query(`DESCRIBE ${resultTableName}`);
+            const resultSchema = schemaRes.toArray().map(r => r.toJSON());
+            
+            // Create new table for result
+            const resultTableId = `table_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+            const newTable: TableData = {
+              id: resultTableId,
+              name: resultTableName,
+              fileName: `Result of stage #${stageIndex}: ${sampleStage.description}`,
+              schema: resultSchema,
+              rows: resultRows,
+              createdAt: new Date()
+            };
+            
+            setTables(prev => [...prev, newTable]);
+            // Store mapping from stage ID to table ID
+            setStageToTableMap(prev => {
+              const newMap = new Map(prev);
+              newMap.set(sampleStage.id, resultTableId);
+              return newMap;
+            });
+            setActiveTableId(resultTableId);
+          } catch (err) {
+            console.warn(`Error executing sample stage:`, err);
+          }
+        }
+        
+        // Add sample stages to transformation stages
+        setTransformationStages(prev => [...prev, ...sampleStages]);
+        setStatus('Sample data loaded with sample stages. Ready for transformations.');
+      } else {
+        setStatus('Sample data loaded. Ready for transformations.');
+      }
+    } else {
+      setStatus('Sample data loaded. Ready for transformations.');
+    }
   };
 
   useEffect(() => {
@@ -436,7 +517,7 @@ function App() {
 
       // Generate SQL from the stage
       const sql = generateSQLFromStage(stage, defaultTableName);
-      
+
       // Get stage index for table naming
       // If stage exists in list, use its index; otherwise use the next index (for new stages)
       const stageIndex = transformationStages.findIndex(s => s.id === stage.id);
@@ -453,25 +534,44 @@ function App() {
       const schemaRes = await conn.query(`DESCRIBE ${resultTableName}`);
       const resultSchema = schemaRes.toArray().map(r => r.toJSON());
 
-      // Create new table for result
-      const resultTableId = `table_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      const newTable: TableData = {
-        id: resultTableId,
-        name: resultTableName,
-        fileName: `Result of stage #${displayIndex}: ${stage.description}`,
-        schema: resultSchema,
-        rows: resultRows,
-        createdAt: new Date()
-      };
+      // Check if this stage already has a result table
+      const existingTableId = stageToTableMap.get(stage.id);
+      
+      if (existingTableId) {
+        // Update existing table
+        setTables(prev => prev.map(t => 
+          t.id === existingTableId 
+            ? {
+                ...t,
+                name: resultTableName,
+                fileName: `Result of stage #${displayIndex}: ${stage.description}`,
+                schema: resultSchema,
+                rows: resultRows
+              }
+            : t
+        ));
+        setActiveTableId(existingTableId);
+      } else {
+        // Create new table for result
+        const resultTableId = `table_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        const newTable: TableData = {
+          id: resultTableId,
+          name: resultTableName,
+          fileName: `Result of stage #${displayIndex}: ${stage.description}`,
+          schema: resultSchema,
+          rows: resultRows,
+          createdAt: new Date()
+        };
 
-      setTables(prev => [...prev, newTable]);
-      // Store mapping from stage ID to table ID
-      setStageToTableMap(prev => {
-        const newMap = new Map(prev);
-        newMap.set(stage.id, resultTableId);
-        return newMap;
-      });
-      setActiveTableId(resultTableId);
+        setTables(prev => [...prev, newTable]);
+        // Store mapping from stage ID to table ID
+        setStageToTableMap(prev => {
+          const newMap = new Map(prev);
+          newMap.set(stage.id, resultTableId);
+          return newMap;
+        });
+        setActiveTableId(resultTableId);
+      }
       setStatus(`Done! Created result table with ${resultRows.length} rows.`);
       setError(null);
     } catch (err) {
@@ -556,7 +656,9 @@ function App() {
       type: 'FILTER', // Default type, user can change it
       description: '',
       timestamp: new Date(),
-      data: {}
+      data: {
+        operator: '=' // Initialize with default operator for FILTER type
+      }
     };
     
     // Add to stages list immediately
@@ -769,6 +871,154 @@ function App() {
     }
   });
 
+  // Export stage flow to JSON
+  const exportStagesToJSON = () => {
+    // Convert TransformationStage[] to sampleStages.json format (without timestamp)
+    // Use readable IDs matching the displayed stage numbers
+    const exportData = transformationStages.map((stage, index) => ({
+      id: `stage_${index + 1}`,
+      type: stage.type,
+      description: stage.description,
+      data: stage.data || {}
+    }));
+    
+    const jsonString = JSON.stringify(exportData, null, 2);
+    // Show preview
+    setExportPreview({ type: 'json', data: jsonString });
+  };
+  
+  // Download JSON after preview
+  const downloadJSON = () => {
+    if (!exportPreview || exportPreview.type !== 'json' || !exportPreview.data) return;
+    
+    const blob = new Blob([exportPreview.data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `stage-flow-${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    setExportPreview(null);
+  };
+
+  // Export stage flow to image
+  const stageFlowRef = useRef<{ getReactFlowInstance: () => any } | null>(null);
+  
+  const exportStagesToImage = async () => {
+    if (!stageFlowRef.current) {
+      setError('Stage flow not ready');
+      return;
+    }
+    
+    try {
+      const reactFlowInstance = stageFlowRef.current.getReactFlowInstance();
+      if (!reactFlowInstance) {
+        setError('ReactFlow instance not available');
+        return;
+      }
+      
+      // Save current viewport to restore later
+      const currentViewport = reactFlowInstance.getViewport();
+      
+      // Get all nodes to calculate bounds
+      const nodes = reactFlowInstance.getNodes();
+      if (nodes.length === 0) {
+        setError('No nodes to export');
+        return;
+      }
+      
+      // Calculate the bounding box of all nodes
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      nodes.forEach((node: any) => {
+        const nodeWidth = 280; // Fixed node width from StageGraphFlow
+        const nodeHeight = 120; // Approximate node height
+        minX = Math.min(minX, node.position.x);
+        minY = Math.min(minY, node.position.y);
+        maxX = Math.max(maxX, node.position.x + nodeWidth);
+        maxY = Math.max(maxY, node.position.y + nodeHeight);
+      });
+      
+      // Add padding
+      const padding = 50;
+      minX -= padding;
+      minY -= padding;
+      maxX += padding;
+      maxY += padding;
+      
+      const width = maxX - minX;
+      const height = maxY - minY;
+      
+      // Get the ReactFlow container
+      const reactFlowElement = document.querySelector('.react-flow') as HTMLElement;
+      if (!reactFlowElement) {
+        setError('Could not find flow canvas');
+        reactFlowInstance.setViewport(currentViewport, { duration: 0 });
+        return;
+      }
+      
+      const containerRect = reactFlowElement.getBoundingClientRect();
+      
+      // Calculate zoom to fit content in viewport
+      const zoomX = containerRect.width / width;
+      const zoomY = containerRect.height / height;
+      const zoom = Math.min(zoomX, zoomY, 1); // Don't zoom in beyond 1x
+      
+      // Calculate position to center content
+      const x = -(minX * zoom) + (containerRect.width - width * zoom) / 2;
+      const y = -(minY * zoom) + (containerRect.height - height * zoom) / 2;
+      
+      // Set viewport to center nodes
+      reactFlowInstance.setViewport({ x, y, zoom }, { duration: 0 });
+      
+      // Wait for viewport to update
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
+      // Get the viewport element (the actual canvas)
+      const viewportElement = document.querySelector('.react-flow__viewport') as HTMLElement;
+      if (!viewportElement) {
+        setError('Could not find flow viewport');
+        reactFlowInstance.setViewport(currentViewport, { duration: 0 });
+        return;
+      }
+      
+      // Use html2canvas to capture the ReactFlow container
+      const canvas = await html2canvas(reactFlowElement, {
+        backgroundColor: themeConfig.colors.surface,
+        useCORS: true,
+        scale: 2, // Higher quality
+        logging: false,
+      });
+      
+      // Convert canvas to data URL for preview
+      const dataUrl = canvas.toDataURL('image/png');
+      setExportPreview({ type: 'image', data: dataUrl });
+      setError(null); // Clear any previous errors
+      
+      // Restore original viewport
+      setTimeout(() => {
+        reactFlowInstance.setViewport(currentViewport, { duration: 300 });
+      }, 100);
+    } catch (err) {
+      console.error('Error exporting image:', err);
+      setError(`Failed to export image: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    }
+  };
+  
+  // Download image after preview
+  const downloadImage = () => {
+    if (!exportPreview || exportPreview.type !== 'image' || !exportPreview.data) return;
+    
+    const link = document.createElement('a');
+    link.href = exportPreview.data;
+    link.download = `stage-flow-${new Date().toISOString().split('T')[0]}.png`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setExportPreview(null);
+  };
+
   return (
     <div style={{ 
       display: 'flex', 
@@ -815,8 +1065,9 @@ function App() {
               paddingRight: '10px'
             }}>
               <StageGraphFlow
+                ref={stageFlowRef}
                 stages={transformationStages}
-                tables={tables.map(t => ({ id: t.id, name: t.name }))}
+                tables={tables.map(t => ({ id: t.id, name: t.name, schema: t.schema }))}
                 onStageEdit={handleStageEdit}
                 onStageStartEdit={handleStageStartEdit}
                 onStageDelete={handleStageDelete}
@@ -825,6 +1076,8 @@ function App() {
                 newStage={newStage}
                 stageToTableMap={stageToTableMap}
                 onShowTable={(tableId) => setActiveTableId(tableId)}
+                onExportJSON={exportStagesToJSON}
+                onExportImage={exportStagesToImage}
               />
             </div>
           }
@@ -1006,6 +1259,141 @@ function App() {
           }
         />
       </div>
+      
+      {/* Export Preview Modal */}
+      {exportPreview && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          background: 'rgba(0, 0, 0, 0.7)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 10000,
+          padding: '20px'
+        }}
+        onClick={() => setExportPreview(null)}
+        >
+          <div style={{
+            background: themeConfig.colors.surfaceElevated,
+            borderRadius: '12px',
+            padding: '24px',
+            maxWidth: '90vw',
+            maxHeight: '90vh',
+            overflow: 'auto',
+            border: `1px solid ${themeConfig.colors.border}`,
+            boxShadow: themeConfig.shadows.xl
+          }}
+          onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: '16px'
+            }}>
+              <h3 style={{
+                margin: 0,
+                fontSize: '18px',
+                color: themeConfig.colors.text
+              }}>
+                {exportPreview.type === 'json' ? 'JSON Export Preview' : 'Image Export Preview'}
+              </h3>
+              <button
+                onClick={() => setExportPreview(null)}
+                style={{
+                  padding: '4px',
+                  background: 'transparent',
+                  border: 'none',
+                  cursor: 'pointer',
+                  color: themeConfig.colors.textSecondary,
+                  display: 'flex',
+                  alignItems: 'center'
+                }}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </div>
+            
+            {exportPreview.type === 'json' ? (
+              <div style={{
+                background: themeConfig.colors.background,
+                borderRadius: '8px',
+                padding: '16px',
+                marginBottom: '16px',
+                maxHeight: '60vh',
+                overflow: 'auto',
+                fontFamily: 'monospace',
+                fontSize: '13px',
+                color: themeConfig.colors.text,
+                border: `1px solid ${themeConfig.colors.border}`
+              }}>
+                <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  {exportPreview.data}
+                </pre>
+              </div>
+            ) : (
+              <div style={{
+                marginBottom: '16px',
+                textAlign: 'center'
+              }}>
+                <img
+                  src={exportPreview.data || ''}
+                  alt="Stage flow preview"
+                  style={{
+                    maxWidth: '100%',
+                    maxHeight: '60vh',
+                    borderRadius: '8px',
+                    border: `1px solid ${themeConfig.colors.border}`
+                  }}
+                />
+              </div>
+            )}
+            
+            <div style={{
+              display: 'flex',
+              gap: '12px',
+              justifyContent: 'flex-end'
+            }}>
+              <button
+                onClick={() => setExportPreview(null)}
+                style={{
+                  padding: '10px 20px',
+                  background: themeConfig.colors.surface,
+                  border: `1px solid ${themeConfig.colors.border}`,
+                  borderRadius: '6px',
+                  cursor: 'pointer',
+                  color: themeConfig.colors.text,
+                  fontSize: '14px'
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={exportPreview.type === 'json' ? downloadJSON : downloadImage}
+                style={{
+                  padding: '10px 20px',
+                  background: themeConfig.colors.primary,
+                  border: 'none',
+                  borderRadius: '6px',
+                  cursor: 'pointer',
+                  color: 'white',
+                  fontSize: '14px',
+                  fontWeight: '500'
+                }}
+              >
+                Download
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,0 +1,14 @@
+[
+  {
+    "id": "sample_join_customers_orders",
+    "type": "JOIN",
+    "description": "Join customers and orders tables on customer_id",
+    "data": {
+      "joinType": "INNER",
+      "leftTable": "orders",
+      "rightTable": "customers",
+      "leftKey": "customer_id",
+      "rightKey": "customer_id"
+    }
+  }
+]

@@ -11,7 +11,18 @@ export function generateSQLFromStage(stage: TransformationStage, sourceTableName
       }
       const joinType = stage.data.joinType || 'INNER';
       const joinKeyword = joinType === 'FULL OUTER' ? 'FULL OUTER JOIN' : `${joinType} JOIN`;
-      return `SELECT * FROM ${stage.data.leftTable} ${joinKeyword} ${stage.data.rightTable} ON ${stage.data.leftTable}.${stage.data.leftKey} = ${stage.data.rightTable}.${stage.data.rightKey}`;
+      
+      // Use table aliases and EXCLUDE to avoid duplicate columns
+      const leftAlias = 'l';
+      const rightAlias = 'r';
+      
+      // If join keys have the same name, use USING clause to avoid duplication
+      if (stage.data.leftKey === stage.data.rightKey) {
+        return `SELECT ${leftAlias}.*, ${rightAlias}.* EXCLUDE (${stage.data.rightKey}) FROM ${stage.data.leftTable} ${leftAlias} ${joinKeyword} ${stage.data.rightTable} ${rightAlias} USING (${stage.data.leftKey})`;
+      } else {
+        // Different key names - select all from both with table prefixes
+        return `SELECT ${leftAlias}.*, ${rightAlias}.* FROM ${stage.data.leftTable} ${leftAlias} ${joinKeyword} ${stage.data.rightTable} ${rightAlias} ON ${leftAlias}.${stage.data.leftKey} = ${rightAlias}.${stage.data.rightKey}`;
+      }
     }
 
     case 'UNION': {
