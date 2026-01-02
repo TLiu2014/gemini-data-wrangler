@@ -349,7 +349,7 @@ export function MenuBar({
                   color: themeConfig.colors.text,
                   marginTop: '8px'
                 }}>
-                  <span>Ask before loading new flow</span>
+                  <span>Show confirmation dialog when loading flow</span>
                   <input
                     type="checkbox"
                     checked={askBeforeLoad}
@@ -370,7 +370,7 @@ export function MenuBar({
                   fontSize: '12px',
                   color: themeConfig.colors.textSecondary
                 }}>
-                  When enabled, always show confirmation modal even if preference is saved
+                  If checked, a confirmation dialog will appear before processing flow images. If unchecked, the saved preference will be used automatically.
                 </p>
               </div>
             </div>

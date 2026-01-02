@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useTheme } from './ThemeProvider';
 
 interface Props {
@@ -16,6 +16,8 @@ export function FlowUploadModal({ isOpen, onClose, onReplace, onAddSideBySide, e
   const handleReplace = () => {
     if (rememberChoice) {
       localStorage.setItem('flow_upload_preference', JSON.stringify({ action: 'replace' }));
+      // Disable "ask before load" so dialog won't show next time
+      localStorage.setItem('flow_upload_ask_before', 'false');
     }
     onReplace();
     onClose();
@@ -24,33 +26,13 @@ export function FlowUploadModal({ isOpen, onClose, onReplace, onAddSideBySide, e
   const handleAddSideBySide = () => {
     if (rememberChoice) {
       localStorage.setItem('flow_upload_preference', JSON.stringify({ action: 'add' }));
+      // Disable "ask before load" so dialog won't show next time
+      localStorage.setItem('flow_upload_ask_before', 'false');
     }
     onAddSideBySide();
     onClose();
   };
 
-  // Load saved preference and auto-execute if exists (only if "ask before load" is disabled)
-  useEffect(() => {
-    if (isOpen) {
-      // Check if "ask before load" is enabled - if so, don't auto-execute
-      const askBeforeLoad = localStorage.getItem('flow_upload_ask_before');
-      if (askBeforeLoad === 'false') {
-        // Only auto-execute if "ask before load" is explicitly disabled
-        const saved = localStorage.getItem('flow_upload_preference');
-        if (saved) {
-          const preference = JSON.parse(saved);
-          setRememberChoice(true);
-          // Auto-execute if preference exists
-          if (preference.action === 'replace') {
-            handleReplace();
-          } else if (preference.action === 'add') {
-            handleAddSideBySide();
-          }
-        }
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen]);
 
   const handleCancel = () => {
     onClose();
@@ -196,7 +178,7 @@ export function FlowUploadModal({ isOpen, onClose, onReplace, onAddSideBySide, e
               cursor: 'pointer'
             }}
           >
-            Remember my choice
+            Remember my choice (don't ask next time)
           </label>
         </div>
 

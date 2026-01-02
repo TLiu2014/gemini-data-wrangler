@@ -68,8 +68,8 @@ function App() {
   const [status, setStatus] = useState('Initializing Engine...');
   const [isProcessing, setIsProcessing] = useState(false);
   const [apiKey, setApiKey] = useState<string | null>(() => {
-    // Load from localStorage if available
-    return localStorage.getItem('gemini_api_key');
+    // Load from sessionStorage if available (more secure - cleared on tab close)
+    return sessionStorage.getItem('gemini_api_key');
   });
   const [hasDefaultApiKey, setHasDefaultApiKey] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -90,11 +90,7 @@ function App() {
   const [imageExplanation, setImageExplanation] = useState<string>('');
   // Flow upload modal state
   const [showFlowUploadModal, setShowFlowUploadModal] = useState(false);
-  const [pendingFlowData, setPendingFlowData] = useState<{
-    tables: any[];
-    stages: any[];
-    explanation: string;
-  } | null>(null);
+  const [pendingImageFile, setPendingImageFile] = useState<File | null>(null);
 
   // Get current active table data
   const activeTable = tables.find(t => t.id === activeTableId);
@@ -271,6 +267,12 @@ function App() {
       setStatus('Loading sample data...');
     });
 
+    // Security check: Warn if not using HTTPS in production
+    if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+      console.warn('⚠️ SECURITY WARNING: API keys should only be transmitted over HTTPS in production!');
+      setError('Security Warning: Not using HTTPS. API keys may be exposed. Use HTTPS in production.');
+    }
+
     // Check if server has default API key
     fetch('/api/config')
       .then(res => res.json())
@@ -297,7 +299,7 @@ function App() {
 
   const handleApiKeySet = (key: string) => {
     setApiKey(key);
-    localStorage.setItem('gemini_api_key', key);
+    sessionStorage.setItem('gemini_api_key', key);
     setError(null); // Clear any previous errors
   };
 
@@ -845,56 +847,24 @@ function App() {
 
   // Handle replace flow (clear canvas then load)
   const handleReplaceFlow = async () => {
-    if (!pendingFlowData) return;
+    if (!pendingImageFile) return;
     
-    setIsProcessing(true);
-    setStatus('Replacing flow...');
-    setError(null);
+    setShowFlowUploadModal(false);
+    const imageFile = pendingImageFile;
+    setPendingImageFile(null);
     
-    try {
-      await processFlowData(
-        pendingFlowData.tables,
-        pendingFlowData.stages,
-        true, // clear existing
-        0 // no horizontal offset
-      );
-      setError(null);
-    } catch (err) {
-      console.error('Error replacing flow:', err);
-      setError(`Failed to replace flow: ${err instanceof Error ? err.message : 'Unknown error'}`);
-      setStatus('Error replacing flow');
-    } finally {
-      setIsProcessing(false);
-      setPendingFlowData(null);
-    }
+    await processImageWithGemini(imageFile, 'replace');
   };
 
   // Handle add flow side-by-side
   const handleAddFlowSideBySide = async () => {
-    if (!pendingFlowData) return;
+    if (!pendingImageFile) return;
     
-    setIsProcessing(true);
-    setStatus('Adding flow side-by-side...');
-    setError(null);
+    setShowFlowUploadModal(false);
+    const imageFile = pendingImageFile;
+    setPendingImageFile(null);
     
-    try {
-      // Calculate horizontal offset based on existing stages
-      const horizontalOffset = transformationStages.length > 0 ? 400 : 0;
-      await processFlowData(
-        pendingFlowData.tables,
-        pendingFlowData.stages,
-        false, // don't clear existing
-        horizontalOffset
-      );
-      setError(null);
-    } catch (err) {
-      console.error('Error adding flow:', err);
-      setError(`Failed to add flow: ${err instanceof Error ? err.message : 'Unknown error'}`);
-      setStatus('Error adding flow');
-    } finally {
-      setIsProcessing(false);
-      setPendingFlowData(null);
-    }
+    await processImageWithGemini(imageFile, 'add');
   };
 
   const handleStageAdd = () => {
@@ -1125,8 +1095,8 @@ function App() {
     }
   });
 
-  // Handle image upload for analysis
-  const handleImageUpload = async (imageFile: File) => {
+  // Process image with Gemini and handle response
+  const processImageWithGemini = async (imageFile: File, action: 'replace' | 'add' | null = null) => {
     if (!db || !conn) return;
 
     setIsProcessing(true);
@@ -1192,60 +1162,30 @@ function App() {
           throw new Error('No tables found in the image');
         }
 
-        // For stage_flow with existing stages, show modal or auto-execute based on settings
-        if (imageType === 'stage_flow' && stagesFromGemini && Array.isArray(stagesFromGemini) && stagesFromGemini.length > 0 && transformationStages.length > 0) {
-          // Check if "ask before load" is enabled
-          const askBeforeLoad = localStorage.getItem('flow_upload_ask_before') === 'true';
-          
-          // If "ask before load" is enabled, always show modal
-          if (askBeforeLoad) {
-            setPendingFlowData({
-              tables: tablesFromGemini,
-              stages: stagesFromGemini,
-              explanation: explanation || ''
-            });
-            setShowFlowUploadModal(true);
-            setStatus('Flow detected. Please choose an action.');
-            return;
+        // For stage_flow, process based on action or default behavior
+        if (imageType === 'stage_flow' && stagesFromGemini && Array.isArray(stagesFromGemini) && stagesFromGemini.length > 0) {
+          if (action === 'replace') {
+            // Replace current flow
+            await processFlowData(tablesFromGemini, stagesFromGemini, true, 0);
+            setStatus('Flow replaced successfully.');
+          } else if (action === 'add') {
+            // Add side-by-side
+            const horizontalOffset = transformationStages.length > 0 ? 400 : 0;
+            await processFlowData(tablesFromGemini, stagesFromGemini, false, horizontalOffset);
+            setStatus('Flow added successfully.');
+          } else {
+            // No action specified - process directly (no existing stages)
+            await processFlowData(tablesFromGemini, stagesFromGemini, false, 0);
+            setStatus('Flow loaded successfully.');
           }
-          
-          // Check if user has a saved preference
-          const savedPreference = localStorage.getItem('flow_upload_preference');
-          if (savedPreference) {
-            const preference = JSON.parse(savedPreference);
-            // Auto-execute based on preference
-            setPendingFlowData({
-              tables: tablesFromGemini,
-              stages: stagesFromGemini,
-              explanation: explanation || ''
-            });
-            if (preference.action === 'replace') {
-              await handleReplaceFlow();
-              return;
-            } else if (preference.action === 'add') {
-              await handleAddFlowSideBySide();
-              return;
-            }
-          }
-          
-          // No preference - show modal (default behavior)
-          setPendingFlowData({
-            tables: tablesFromGemini,
-            stages: stagesFromGemini,
-            explanation: explanation || ''
-          });
-          setShowFlowUploadModal(true);
-          setStatus('Flow detected. Please choose an action.');
-          return;
-        }
-
-        // For data_table or stage_flow with no existing stages, process directly
-        if (imageType === 'data_table') {
+        } else if (imageType === 'data_table') {
           // Process data table directly
           await processFlowData(tablesFromGemini, [], false, 0);
+          setStatus('Table loaded successfully.');
         } else if (imageType === 'stage_flow') {
-          // Process stage flow directly (no existing stages)
-          await processFlowData(tablesFromGemini, stagesFromGemini || [], true, 0);
+          // Process stage flow directly (no stages from Gemini)
+          await processFlowData(tablesFromGemini, [], false, 0);
+          setStatus('Flow loaded successfully.');
         }
       } else if (imageType === 'schema') {
         setStatus('Schema image analyzed - see explanation below.');
@@ -1260,6 +1200,37 @@ function App() {
     } finally {
       setIsProcessing(false);
     }
+  };
+
+  // Handle image upload - check settings and show modal if needed
+  const handleImageUpload = async (imageFile: File) => {
+    if (!db || !conn) return;
+
+    // Check if "ask before load" is enabled and there are existing stages
+    const askBeforeLoad = localStorage.getItem('flow_upload_ask_before') === 'true';
+    const hasExistingStages = transformationStages.length > 0;
+
+    // If "ask before load" is checked and there are existing stages, show modal first
+    if (askBeforeLoad && hasExistingStages) {
+      setPendingImageFile(imageFile);
+      setShowFlowUploadModal(true);
+      setStatus('Image selected. Please choose how to handle the flow.');
+      return;
+    }
+
+    // If "ask before load" is unchecked, check for saved preference
+    if (!askBeforeLoad && hasExistingStages) {
+      const savedPreference = localStorage.getItem('flow_upload_preference');
+      if (savedPreference) {
+        const preference = JSON.parse(savedPreference);
+        // Auto-execute based on preference
+        await processImageWithGemini(imageFile, preference.action);
+        return;
+      }
+    }
+
+    // No existing stages or no preference - process directly
+    await processImageWithGemini(imageFile, null);
   };
 
   // Export stage flow to JSON
@@ -1663,8 +1634,7 @@ function App() {
         isOpen={showFlowUploadModal}
         onClose={() => {
           setShowFlowUploadModal(false);
-          setPendingFlowData(null);
-          setIsProcessing(false);
+          setPendingImageFile(null);
         }}
         onReplace={handleReplaceFlow}
         onAddSideBySide={handleAddFlowSideBySide}

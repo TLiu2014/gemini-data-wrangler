@@ -26,8 +26,35 @@ const upload = multer({
 app.use(cors());
 app.use(express.json());
 
+// Security headers
+app.use((req, res, next) => {
+  // Prevent clickjacking
+  res.setHeader('X-Frame-Options', 'DENY');
+  // Prevent MIME type sniffing
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  // XSS Protection (legacy browsers)
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  // Content Security Policy
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline';");
+  // Referrer Policy
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  next();
+});
+
 // Initialize Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+
+// Validate API key format (basic validation)
+function validateApiKey(apiKey) {
+  if (!apiKey || typeof apiKey !== 'string') return false;
+  // Gemini API keys typically start with 'AIza' and are 39 characters
+  // Basic validation without being too strict
+  const trimmed = apiKey.trim();
+  if (trimmed.length < 30 || trimmed.length > 50) return false;
+  // Check for basic alphanumeric pattern (allowing dashes and underscores)
+  if (!/^[A-Za-z0-9_-]+$/.test(trimmed)) return false;
+  return true;
+}
 
 // Define the response schema we want Gemini to strictly follow
 const responseSchema = {
@@ -156,6 +183,13 @@ app.post('/api/transform', async (req, res) => {
             });
         }
         
+        // Validate API key format
+        if (!validateApiKey(apiKeyToUse)) {
+            return res.status(400).json({ 
+                error: "Invalid API key format. Please check your API key." 
+            });
+        }
+        
         // Create a new instance with the provided API key
         const genAIInstance = new GoogleGenerativeAI(apiKeyToUse);
         
@@ -234,9 +268,6 @@ app.post('/api/transform', async (req, res) => {
         const result = await model.generateContent(prompt);
         const response = result.response.text();
         const parsedResponse = JSON.parse(response);
-        
-        // Log the response for debugging
-        console.log('Gemini response:', JSON.stringify(parsedResponse, null, 2));
         
         // Validate that transformationStages exists
         if (!parsedResponse.transformationStages || !Array.isArray(parsedResponse.transformationStages)) {
@@ -414,6 +445,13 @@ app.post('/api/analyze-flow-image', upload.single('image'), handleMulterError, a
             });
         }
         
+        // Validate API key format
+        if (!validateApiKey(apiKeyToUse)) {
+            return res.status(400).json({ 
+                error: "Invalid API key format. Please check your API key." 
+            });
+        }
+        
         // Create a new instance with the provided API key
         const genAIInstance = new GoogleGenerativeAI(apiKeyToUse);
         
@@ -481,9 +519,6 @@ Important:
         const result = await model.generateContent([prompt, imagePart]);
         const response = result.response.text();
         const parsedResponse = JSON.parse(response);
-        
-        // Log the response for debugging
-        console.log('Gemini image analysis response:', JSON.stringify(parsedResponse, null, 2));
         
         res.json(parsedResponse);
     } catch (error) {
