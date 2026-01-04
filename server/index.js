@@ -77,7 +77,7 @@ const responseSchema = {
                     },
                     description: { 
                         type: SchemaType.STRING, 
-                        description: "Clear description of what this transformation stage does" 
+                        description: "Clear description of what this transformation stage does. DO NOT include file extensions like '_csv', '.csv' in table names mentioned in descriptions. Use clean table names like 'table_orders' not 'table_orders_csv'." 
                     },
                     data: {
                         type: SchemaType.OBJECT,
@@ -253,9 +253,9 @@ app.post('/api/transform', async (req, res) => {
                - Example: If SQL is "SELECT o.*, c.name FROM orders o LEFT JOIN customers c ON o.customer_id = c.id"
                  → Return 1 stage: [{"type": "JOIN", "description": "Left join orders with customers", "data": {"joinType": "LEFT", "leftTable": "orders", "rightTable": "customers", "leftKey": "customer_id", "rightKey": "id"}}]
                
-               - Example: If SQL is "SELECT c.region, SUM(o.amount) AS total_sales FROM table_orders_csv o JOIN table_customers_csv c ON o.customer_id = c.customer_id GROUP BY c.region ORDER BY total_sales DESC"
+               - Example: If SQL is "SELECT c.region, SUM(o.amount) AS total_sales FROM table_orders o JOIN table_customers c ON o.customer_id = c.customer_id GROUP BY c.region ORDER BY total_sales DESC"
                  → Return 3 stages: [
-                     {"type": "JOIN", "description": "Join orders with customers", "data": {"joinType": "INNER", "leftTable": "table_orders_csv", "rightTable": "table_customers_csv", "leftKey": "customer_id", "rightKey": "customer_id"}},
+                     {"type": "JOIN", "description": "Join orders with customers", "data": {"joinType": "INNER", "leftTable": "table_orders", "rightTable": "table_customers", "leftKey": "customer_id", "rightKey": "customer_id"}},
                      {"type": "GROUP", "description": "Group by region and sum sales", "data": {"groupBy": ["c.region"], "aggregations": [{"function": "SUM", "column": "o.amount", "alias": "total_sales"}]}},
                      {"type": "SORT", "description": "Sort by total sales descending", "data": {"orderBy": [{"column": "total_sales", "direction": "DESC"}]}}
                    ]
@@ -299,7 +299,7 @@ const imageAnalysisResponseSchema = {
             items: {
                 type: SchemaType.OBJECT,
                 properties: {
-                    name: { type: SchemaType.STRING, description: "Table name" },
+                    name: { type: SchemaType.STRING, description: "Table name (DO NOT include file extensions like _csv, _xlsx, .csv, etc. - these are data tables, not files)" },
                     columns: {
                         type: SchemaType.ARRAY,
                         items: {
@@ -340,7 +340,7 @@ const imageAnalysisResponseSchema = {
                     },
                     description: { 
                         type: SchemaType.STRING, 
-                        description: "Clear description of what this transformation stage does" 
+                        description: "Clear description of what this transformation stage does. DO NOT include file extensions like '_csv', '.csv' in table names mentioned in descriptions. Use clean table names like 'table_orders' not 'table_orders_csv'." 
                     },
                     data: {
                         type: SchemaType.OBJECT,
@@ -400,7 +400,7 @@ const imageAnalysisResponseSchema = {
                                 description: "For SORT: array of sort specifications"
                             },
                             // For LOAD
-                            tableName: { type: SchemaType.STRING, description: "For LOAD: table name" },
+                            tableName: { type: SchemaType.STRING, description: "For LOAD: table name (DO NOT include file extensions like _csv, _xlsx, .csv, etc.)" },
                             // For CUSTOM
                             sql: { type: SchemaType.STRING, description: "For CUSTOM: the SQL query string" }
                         }
@@ -434,7 +434,17 @@ app.post('/api/analyze-flow-image', upload.single('image'), handleMulterError, a
             return res.status(400).json({ error: "No image file provided" });
         }
 
-        const { apiKey } = req.body;
+        const { apiKey, context } = req.body;
+        
+        // Parse context if provided (existing tables and stages)
+        let existingContext = null;
+        if (context) {
+            try {
+                existingContext = JSON.parse(context);
+            } catch (e) {
+                console.warn('Failed to parse context:', e);
+            }
+        }
         
         // Use API key from request body (if provided), fallback to environment variable
         const apiKeyToUse = (apiKey && apiKey.trim()) || process.env.GEMINI_API_KEY;
@@ -468,44 +478,372 @@ app.post('/api/analyze-flow-image', upload.single('image'), handleMulterError, a
         const imageBase64 = req.file.buffer.toString('base64');
         const mimeType = req.file.mimetype;
         
+        // Build context information for prompt
+        let contextInfo = '';
+        let hasExistingContext = false;
+        if (existingContext && (existingContext.existingTables?.length > 0 || existingContext.existingStages?.length > 0)) {
+            hasExistingContext = true;
+            contextInfo = '\n\nEXISTING FLOW CONTEXT:\n';
+            if (existingContext.existingTables?.length > 0) {
+                contextInfo += 'Existing tables (NOTE: column names are pre-normalized to lowercase for easier matching):\n';
+                contextInfo += '⚠️ PRIORITY: You MUST try to connect to the [LATEST] table first! Then other result tables, then loaded tables.\n\n';
+                
+                // Separate result tables from loaded tables
+                const latestResultTable = existingContext.existingTables.find(t => t.isLatestResultTable);
+                const otherResultTables = existingContext.existingTables.filter(t => t.isResultTable && !t.isLatestResultTable);
+                const loadedTables = existingContext.existingTables.filter(t => !t.isResultTable);
+
+                if (latestResultTable) {
+                    contextInfo += '🎯 LATEST RESULT TABLE (HIGHEST PRIORITY - TRY THIS FIRST!):\n';
+                    const normalizedColumns = latestResultTable.columns.map(c => `${c.name.toLowerCase()} (${c.type})`).join(', ');
+                    contextInfo += `  - ${latestResultTable.name} (columns: ${normalizedColumns}) [LATEST]\n\n`;
+                }
+                
+                if (otherResultTables.length > 0) {
+                    contextInfo += 'OTHER RESULT TABLES (from previous stages - try these next):\n';
+                    otherResultTables.forEach((table, idx) => {
+                        const normalizedColumns = table.columns.map(c => `${c.name.toLowerCase()} (${c.type})`).join(', ');
+                        contextInfo += `  ${idx + 1}. ${table.name} (columns: ${normalizedColumns})\n`;
+                    });
+                    contextInfo += '\n';
+                }
+                
+                if (loadedTables.length > 0) {
+                    contextInfo += 'LOADED TABLES (original sources - use only as a last resort):\n';
+                    loadedTables.forEach((table, idx) => {
+                        const normalizedColumns = table.columns.map(c => `${c.name.toLowerCase()} (${c.type})`).join(', ');
+                        contextInfo += `  ${idx + 1}. ${table.name} (columns: ${normalizedColumns})\n`;
+                    });
+                }
+            }
+            if (existingContext.existingStages?.length > 0) {
+                contextInfo += '\n\nEXISTING TRANSFORMATION STAGES (in order):\n';
+                existingContext.existingStages.forEach((stage, idx) => {
+                    const stageNum = idx + 1;
+                    const resultInfo = stage.resultTableName ? ` → produces table: ${stage.resultTableName}` : '';
+                    const isLatest = idx === existingContext.latestStageIndex;
+                    const latestMarker = isLatest ? ' [LATEST - CONTINUE FROM HERE!]' : '';
+                    contextInfo += `  ${stageNum}. ${stage.type}: ${stage.description}${resultInfo}${latestMarker}\n`;
+                });
+            }
+            
+            if (existingContext.stageToTableInfo && existingContext.stageToTableInfo.length > 0) {
+                contextInfo += '\nSTAGE-TO-TABLE MAPPING (which stage produces which table):\n';
+                existingContext.stageToTableInfo.forEach((info, idx) => {
+                    contextInfo += `  Stage ${idx + 1} (${info.stageType}): "${info.stageDescription}" → Table: ${info.resultTableName}\n`;
+                });
+            }
+            
+            contextInfo += `
+🔥🔥🔥 CRITICAL INSTRUCTION FOR TABLE INTEGRATION 🔥🔥🔥
+If the uploaded image contains a data table, you MUST find connections to CONTINUE the existing flow:
+
+1. CONNECTION PRIORITY (MANDATORY - FOLLOW THIS ORDER EXACTLY):
+   ⚠️⚠️⚠️ YOU MUST TRY IN THIS ORDER - DO NOT SKIP STEPS! ⚠️⚠️⚠️
+   
+   STEP 1 (HIGHEST PRIORITY): Try to connect to the [LATEST] result table
+   - This is the final output of the current flow (marked [LATEST] above)
+   - Look for matching columns between the new table and the [LATEST] table
+   - If you find ANY matching columns (even weak matches), create a JOIN stage connecting to the [LATEST] table
+   - Use the [LATEST] table name in your JOIN stage (leftTable or rightTable)
+   - This CONTINUES the flow from where it left off
+   
+   STEP 2 (SECOND PRIORITY): If Step 1 fails, try connecting to OTHER RESULT TABLES
+   - These are tables produced by previous stages (not the latest)
+   - Try to find connections to these intermediate result tables
+   - This allows building on previous transformations
+   
+   STEP 3 (LOWEST PRIORITY - LAST RESORT): Only if Steps 1 and 2 fail, connect to LOADED TABLES
+   - These are the original source tables (not result tables)
+   - Only use these if you cannot connect to any result tables
+   - This is the least preferred option
+
+2. CASE-INSENSITIVE & SEMANTIC COLUMN MATCHING:
+   - Compare column names case-insensitively (e.g., "Customer_ID" matches "customer_id")
+   - Look for similar meanings (e.g., "cust_id" matches "client_id")
+   - NORMALIZE in your mind: remove underscores, convert to lowercase, then compare
+   - Be AGGRESSIVE in finding matches - even 50% similarity should trigger a connection
+
+3. GENERATE TRANSFORMATION STAGES:
+   - ⚠️ CRITICAL: Do NOT generate \`LOAD\` stages for any tables. The app handles loading automatically.
+   - When creating JOIN stages, use the table name from the priority list above (prefer [LATEST] table)
+   - Add other stages (\`SELECT\`, \`FILTER\`, \`GROUP\`, \`SORT\`) as needed to complete the transformation
+   - The new table from the image should be the other table in the JOIN (rightTable or leftTable)
+
+4. EXAMPLE BEHAVIOR:
+   - If [LATEST] table has columns: [customer_id, order_date, amount]
+   - And new table has columns: [customer_id, product_name, price]
+   - You MUST create a JOIN stage: JOIN [LATEST table] with [new table] on customer_id
+   - This continues the flow from the latest stage
+
+🎯 YOUR PRIMARY GOAL: CONTINUE THE FLOW FROM THE LATEST STAGE! Connect the new table to the [LATEST] result table first!
+`;
+        }
+        
         const prompt = `
-You are analyzing an image that may contain one of the following:
-1. A data transformation flow diagram (showing stages like JOIN, FILTER, GROUP, etc. connected together)
-2. A data table (showing tabular data with rows and columns)
-3. A database schema (showing table structures and relationships)
-4. Something else (not a stage flow, data table, or schema)
+You are an expert Data Engineer analyzing images for data pipeline integration.
 
-Your task:
-1. First, determine what type of image this is:
-   - If it's a flow diagram with transformation stages (like JOIN, FILTER, GROUP, etc.) connected together, set imageType to "stage_flow"
-   - If it's a data table showing rows and columns of data, set imageType to "data_table"
-   - If it's a database schema showing table structures, set imageType to "schema"
-   - If it's none of the above, set imageType to "unrecognized"
+TASK: Analyze this image and determine its type, extract structured data, and integrate it with existing data flows.
 
-2. Provide a natural language explanation in the "explanation" field:
-   - For stage_flow: Explain the flow, what transformations are happening, and describe the final result table
-   - For data_table: Describe the table structure, columns, and summarize the data content
-   - For schema: Describe the table structures, relationships, and key information
-   - For unrecognized: Explain that this is not a stage flow, data table, or schema, and cannot be processed
+IMAGE TYPES TO DETECT:
+1. "stage_flow" - A data transformation flow diagram.
+2. "data_table" - A table of data (spreadsheet, CSV preview, etc.).
+3. "unrecognized" - Anything else.
 
-3. Extract structured data ONLY if the image type is "stage_flow" or "data_table":
-   - For stage_flow:
-     * Extract all tables (input tables and result tables)
-     * For each table: name, columns (with types), and sample data rows (5-10 rows)
-     * Extract all transformation stages with their details (id, type, description, data)
-     * Maintain the order of stages as shown in the diagram
-   - For data_table:
-     * Extract the table: name, columns (with types), and sample data rows (5-10 rows)
-     * Do NOT include transformationStages (empty array)
-   - For schema or unrecognized:
-     * Set tables to empty array []
-     * Set transformationStages to empty array []
+RESPONSE STRUCTURE:
+- imageType: One of the types above.
+- explanation: Natural language description of what you found.
+- tables: Array of extracted tables (for "data_table" type).
+- transformationStages: Array of transformation stages (see rules below).
 
-Important:
-- Always provide a clear, natural language explanation
-- Only extract structured data (tables/stages) for stage_flow and data_table types
-- Generate realistic sample data (don't use placeholder values)
-- For stage_flow, ensure all stage IDs are unique and the flow is complete
+RULES FOR TABLE EXTRACTION ("data_table" type):
+- Extract ALL visible data.
+- For each table, provide:
+  * name: A descriptive table name (e.g., "products_data", "customers", "orders").
+    ⚠️ CRITICAL: DO NOT include file extensions like "_csv", "_xlsx", ".csv", ".xlsx" in table names.
+    These are data tables, not files. Use clean names like "customers" not "customers_csv" or "customers.csv".
+  * columns: Array of {name, type}. ⚠️ CRITICAL: NORMALIZE all column names to lowercase (e.g., "Customer ID" becomes "customer_id").
+  * rows: Array of data rows (extract at least 10-20 if available).
+- Infer appropriate SQL data types (VARCHAR, INTEGER, DOUBLE, DATE, etc.).
+
+RULES FOR TRANSFORMATION STAGES:
+⚠️⚠️⚠️ CRITICAL: Stage descriptions MUST NOT include file extensions in table names!
+   - Use clean table names like "table_orders" NOT "table_orders_csv" or "table_orders.csv"
+   - Example: "Loaded table 'table_orders' from file 'orders.csv'" ✓
+   - Wrong: "Loaded table 'table_orders_csv' from file 'orders.csv'" ✗
+
+A. For "stage_flow" images:
+   ⚠️⚠️⚠️ CRITICAL RULES FOR TABLES:
+   - The "tables" array MUST ONLY contain SOURCE/INPUT tables (e.g., from CSV files shown in the diagram)
+   - DO NOT include intermediate result tables (e.g., "result_stage_3_join", "joined_data")
+   - DO NOT include tables that are OUTPUTS of transformation stages
+   - ONLY include the initial/raw data tables that are loaded at the beginning of the flow
+   - Example: If diagram shows "customers.csv" and "orders.csv" being loaded, then joined to create "result", 
+     the tables array should ONLY have customers and orders data, NOT the join result
+   
+   ⚠️⚠️⚠️ CRITICAL RULES FOR STAGE IDs:
+   - Generate SEQUENTIAL stage IDs starting from "stage_1", "stage_2", "stage_3", etc.
+   - DO NOT skip numbers or create gaps in the sequence
+   - Count ALL stages including LOAD stages when numbering
+   - Example: stage_1 (LOAD), stage_2 (LOAD), stage_3 (JOIN), stage_4 (FILTER)
+   
+   - Extract ALL stages from the diagram in the correct order, including LOAD stages if present.
+   - LOAD stages represent initial table loading operations in the flow diagram.
+   - CRITICAL: Every stage MUST have a unique id field. This is required.
+   - CRITICAL: Every stage MUST have complete data fields based on its type:
+     * JOIN: MUST include {leftTable, rightTable, leftKey, rightKey, joinType}. DO NOT include other stage fields like "tables" or "unionType".
+       If join key is mentioned in description (e.g., "join on customer_id"), extract it into leftKey and rightKey.
+       DO NOT use placeholder values like "none", "null", or empty string - extract the actual join key from the diagram/description.
+     * FILTER: MUST include {table, column, operator, value}. If the filter condition is ambiguous in the diagram,
+       infer the MOST LIKELY filter based on context (e.g., "Filter results" → check for "status='Active'" or "amount>0")
+     * GROUP: MUST include {table, groupBy, aggregations}
+     * SELECT: MUST include {table, columns}
+     * SORT: MUST include {table, orderBy}
+     * UNION: MUST include {tables, unionType}. DO NOT include JOIN fields like "leftTable" or "rightTable".
+     * LOAD: MUST include {tableName, fileName}
+       ⚠️ IMPORTANT: tableName should NOT include file extensions (e.g., use "customers" not "customers_csv").
+       fileName can include the extension (e.g., "customers.csv") as it represents the actual file.
+   - Include complete data for each stage type (including LOAD stages with tableName).
+   - If a FILTER stage is shown but conditions are unclear, infer reasonable conditions based on:
+     * Common patterns (e.g., "active status", "positive amounts", "recent dates")
+     * Available columns from previous stages
+     * Description text visible in the diagram
+   - DO NOT generate FILTER stages without {column, operator, value} - always infer if needed.
+   - DO NOT mix fields from different stage types (e.g., don't put UNION fields in a JOIN stage).
+
+B. For "data_table" images WITH existing context:
+   ${hasExistingContext ? `
+   ⚠️⚠️⚠️ CRITICAL: You MUST find connections between the new table and the existing flow! ⚠️⚠️⚠️
+   
+   STEP 1 - ANALYZE FOR CONNECTIONS (using pre-normalized lowercase columns):
+   🔍 The new table's columns are normalized to lowercase. The existing table columns in the context are also pre-normalized. This makes matching easy.
+   
+   ⚠️⚠️⚠️ CONNECTION PRIORITY (ABSOLUTE & MANDATORY - FOLLOW EXACTLY!):
+   
+   🔥 STEP 1 (MANDATORY FIRST STEP): Check connection with [LATEST] table
+   - The [LATEST] table is the result of the LAST stage in the flow (marked [LATEST] in the context above)
+   - This table represents the CURRENT STATE of the data pipeline
+   - YOU MUST check this table FIRST before checking any other tables
+   - Look for matching columns (case-insensitive, semantic matching)
+   - If you find ANY matching column, you MUST create a JOIN stage using the [LATEST] table name
+   - Example: If [LATEST] table is "result_stage_5_filter" and has column "customer_id", and new table has "customer_id", create JOIN with "result_stage_5_filter"
+   
+   🔥 STEP 2 (ONLY IF STEP 1 FAILS): Check connection with OTHER RESULT TABLES
+   - These are tables produced by previous stages (not the latest)
+   - Only check these if you found NO matches with the [LATEST] table
+   - Try to find connections to these intermediate result tables
+   
+   🔥 STEP 3 (ONLY IF STEPS 1 & 2 FAIL): Check connection with LOADED TABLES
+   - These are the original source tables (not result tables)
+   - Only check these as a last resort if no result tables have connections
+   
+   ⚠️ CRITICAL RULES:
+   - ALWAYS start with [LATEST] table - do NOT skip to other tables
+   - If [LATEST] table has a matching column, use it - do NOT check other tables
+   - The goal is to CONTINUE the flow from the most recent point
+   - Direct match: "customer_id" in new table + "customer_id" in [LATEST] table → MUST USE [LATEST]!
+   - Semantic match: "cust_id" in new table + "customer_id" in [LATEST] table → MUST USE [LATEST]!
+   
+   STEP 2 - GENERATE INTEGRATION STAGES:
+   ⚠️⚠️⚠️ CRITICAL: Do NOT create a LOAD stage! The table is loaded automatically.
+   ⚠️⚠️⚠️ NEVER include a stage with type "LOAD" in your response.
+   - You MUST ONLY return integration stages (JOIN, UNION, FILTER, GROUP, etc.).
+   - If you find NO connections after checking all tables in priority order, return an empty array [] for transformationStages.
+   
+   - If you find a JOIN connection (prioritizing [LATEST] table):
+     {
+       "id": "stage_join_continuation_1", 
+       "type": "JOIN", 
+       "description": "Join [new_table] with [LATEST_table] to continue flow",
+       "data": { 
+         "joinType": "INNER" | "LEFT" | "RIGHT", 
+         "leftTable": "[LATEST_table_name_from_context]",  // Use [LATEST] table name if match found there
+         "rightTable": "[new_table_name]", 
+         "leftKey": "[column_from_LATEST_table]", 
+         "rightKey": "[column_from_new_table]" 
+       }
+     }
+     ⚠️ IMPORTANT: If you found a match with the [LATEST] table, use the [LATEST] table name in leftTable or rightTable
+     ⚠️ CRITICAL: Always include a unique "id" field for each stage!
+   - Add other stages like FILTER, GROUP, etc. if they would be useful (each with unique IDs).
+   
+   STEP 3 - VALIDATION:
+   - If you find connections, return integration stages (JOIN, UNION, etc.).
+   - If the table is completely unrelated, return an empty array [].
+   - When in doubt, CREATE A JOIN! The user wants integration!
+   
+   📋 CONCRETE EXAMPLE OF REQUIRED BEHAVIOR:
+   
+   Context has:
+   - LATEST TABLE: result_stage_5_filter [customer_id, order_id, amount] [LATEST] ← START HERE!
+   - OTHER RESULT TABLES: result_stage_2_join [customer_id, order_id]
+   - LOADED TABLES: table_customers, table_orders
+   
+   New image has a table "products" with columns [product_id, customer_id, price].
+   
+   ✅ CORRECT BEHAVIOR:
+   → STEP 1: Check [LATEST] table (result_stage_5_filter) - has "customer_id" ✓
+   → STEP 1 RESULT: MATCH FOUND! "customer_id" exists in both tables
+   → YOU MUST GENERATE: A JOIN stage with leftTable="result_stage_5_filter", rightTable="products", leftKey="customer_id", rightKey="customer_id"
+   → YOU MUST STOP HERE - do NOT check other tables because you found a match with [LATEST]
+   → This CONTINUES the flow from the latest stage
+   
+   ❌ WRONG BEHAVIOR:
+   → Checking other result tables first (should check [LATEST] first)
+   → Checking loaded tables first (should check [LATEST] first)
+   → Using a different table name when [LATEST] has a match
+   
+   ❌ WHAT NOT TO DO:
+   - DON'T create LOAD stages. NEVER.
+   - DON'T connect to a lower-priority table if a connection to a higher-priority one exists.
+   - DON'T be conservative - be AGGRESSIVE in finding connections.
+   ` : `
+   - Generate a LOAD stage for the new table with a unique id (e.g., "stage_load_1").
+   - CRITICAL: Always include a unique "id" field in the stage object.
+   - Do NOT generate additional transformation stages.
+   `}
+
+C. For "data_table" images WITHOUT existing context:
+   - Generate only a LOAD stage for the table with a unique id (e.g., "stage_load_1").
+   - CRITICAL: Always include a unique "id" field in the stage object.
+
+D. For "unrecognized" images:
+   - Set tables and transformationStages to empty arrays [].
+
+EXAMPLE STAGE DATA STRUCTURES (CRITICAL - FOLLOW THESE EXACTLY):
+
+1. LOAD stage:
+   {
+     "id": "stage_load_1",
+     "type": "LOAD",
+     "description": "Load customers table",
+     "data": {
+       "tableName": "customers",
+       "fileName": "customers.csv"
+     }
+   }
+
+2. JOIN stage (MUST include ALL these fields):
+   {
+     "id": "stage_join_1",
+     "type": "JOIN",
+     "description": "Join customers and orders on customer_id",
+     "data": {
+       "joinType": "INNER",
+       "leftTable": "customers",
+       "rightTable": "orders",
+       "leftKey": "customer_id",
+       "rightKey": "customer_id"
+     }
+   }
+
+3. FILTER stage (MUST include ALL these fields):
+   {
+     "id": "stage_filter_1",
+     "type": "FILTER",
+     "description": "Filter orders with amount > 100",
+     "data": {
+       "table": "orders",
+       "column": "amount",
+       "operator": ">",
+       "value": "100"
+     }
+   }
+
+4. GROUP stage (MUST include ALL these fields):
+   {
+     "id": "stage_group_1",
+     "type": "GROUP",
+     "description": "Group by customer and sum order amounts",
+     "data": {
+       "table": "orders",
+       "groupBy": ["customer_id"],
+       "aggregations": [
+         {
+           "function": "SUM",
+           "column": "amount",
+           "alias": "total_amount"
+         }
+       ]
+     }
+   }
+
+5. SELECT stage (MUST include ALL these fields):
+   {
+     "id": "stage_select_1",
+     "type": "SELECT",
+     "description": "Select specific columns",
+     "data": {
+       "table": "orders",
+       "columns": ["order_id", "customer_id", "amount", "order_date"]
+     }
+   }
+
+6. SORT stage (MUST include ALL these fields):
+   {
+     "id": "stage_sort_1",
+     "type": "SORT",
+     "description": "Sort by amount descending",
+     "data": {
+       "table": "orders",
+       "orderBy": [
+         {
+           "column": "amount",
+           "direction": "DESC"
+         }
+       ]
+     }
+   }
+
+⚠️ CRITICAL: Every stage MUST have complete data fields as shown above. Do NOT generate stages with missing fields!
+
+DATA QUALITY:
+- Extract real data, not placeholders.
+- Ensure row data matches column order.
+- Provide 10-20+ sample rows if available.
+${contextInfo}
+
+REMEMBER: For a data_table with existing context, your primary goal is INTEGRATION, starting from the [LATEST] point in the flow.
 `;
 
         // Prepare image part for Gemini
@@ -519,6 +857,24 @@ Important:
         const result = await model.generateContent([prompt, imagePart]);
         const response = result.response.text();
         const parsedResponse = JSON.parse(response);
+        
+        // Debug logging to help troubleshoot connection detection
+        if (parsedResponse.imageType === 'data_table' && hasExistingContext) {
+            console.log('\n=== IMAGE ANALYSIS DEBUG ===');
+            console.log('New table:', parsedResponse.tables?.[0]?.name);
+            console.log('New table columns:', parsedResponse.tables?.[0]?.columns?.map(c => c.name).join(', '));
+            console.log('Existing tables:', existingContext.existingTables?.map(t => t.name).join(', '));
+            console.log('Existing columns:', existingContext.existingTables?.map(t => 
+                t.columns.map(c => c.name).join(', ')
+            ).join(' | '));
+            console.log('Stages generated:', parsedResponse.transformationStages?.length || 0);
+            if (parsedResponse.transformationStages?.length > 0) {
+                console.log('Stage types:', parsedResponse.transformationStages.map(s => s.type).join(', '));
+            } else {
+                console.log('⚠️  WARNING: No transformation stages generated despite existing context!');
+            }
+            console.log('===========================\n');
+        }
         
         res.json(parsedResponse);
     } catch (error) {

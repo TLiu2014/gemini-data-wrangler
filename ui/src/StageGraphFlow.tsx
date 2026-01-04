@@ -366,7 +366,8 @@ function StageNodeComponent({ data }: { data: any }) {
               </span>
             )}
             <div style={{ marginLeft: 'auto', display: 'flex', gap: '4px', alignItems: 'center' }}>
-              {stageToTableMap && onShowTable && stageToTableMap.has(stage.id) && (
+              {/* Show table button only for non-LOAD stages that have result tables */}
+              {stageToTableMap && onShowTable && stageToTableMap.has(stage.id) && stage.type !== 'LOAD' && (
                 <button
                   onClick={(e) => {
                     e.preventDefault();
@@ -588,8 +589,12 @@ function StageGraphFlowInner({
     const nodes: Node[] = [];
     const edges: Edge[] = [];
     
-    const verticalGap = 140; // Increased spacing to prevent arrows from being covered by cards
+    const baseVerticalGap = 140; // Base spacing between node positions (same as original)
+    const expandedCardExtraHeight = 380; // Extra height when expanded (to push down nodes below)
     const horizontalCenter = 200;
+    
+    // Calculate cumulative Y positions accounting for expanded nodes
+    let cumulativeY = 0;
     
     // Create nodes
     stages.forEach((stage, index) => {
@@ -602,12 +607,24 @@ function StageGraphFlowInner({
       // Get horizontal offset from stage data if present (for side-by-side flows)
       const horizontalOffset = (stage.data as any)?.horizontalOffset || 0;
       
+      // Calculate Y position: use base spacing like original, but add extra if previous node was expanded
+      const currentY = cumulativeY;
+      
+      // Update cumulative position for next node
+      // Base spacing is 140px (same as original)
+      // If current node is expanded, add extra height so next node is pushed down
+      if (isEditing) {
+        cumulativeY += baseVerticalGap + expandedCardExtraHeight;
+      } else {
+        cumulativeY += baseVerticalGap;
+      }
+      
       nodes.push({
         id: stage.id,
         type: 'stage',
         position: { 
           x: horizontalCenter - 140 + horizontalOffset, // Center the 280px wide node, add offset for side-by-side
-          y: index * verticalGap 
+          y: currentY 
         },
         data: {
           stage,
@@ -791,28 +808,51 @@ function StageGraphFlowInner({
     }
   }, [editingStageId, onStageStartEdit]);
   
+  // Track previous editingStageId to detect when editing state changes
+  const prevEditingStageIdRef = useRef<string | null>(null);
+  
   // Update nodes when stages change
   useEffect(() => {
+    const editingChanged = prevEditingStageIdRef.current !== editingStageId;
+    prevEditingStageIdRef.current = editingStageId;
+    
     setNodes(prevNodes => {
       return initialNodes.map(node => {
         const existingNode = prevNodes.find(n => n.id === node.id);
         const isEditing = editingStageId === node.id;
+        
         if (existingNode) {
-          // Preserve position if node exists
-          return {
-            ...node,
-            position: existingNode.position,
-            draggable: true, // All cards are draggable, even when editing
-            data: {
-              ...node.data,
-              isEditing,
-            },
-          };
+          // When editing state changes, recalculate all positions to push down nodes
+          // This ensures expanded nodes push down nodes below them
+          // Otherwise, preserve manually dragged positions
+          if (editingChanged) {
+            // Recalculate position from initialNodes to account for expanded nodes
+            return {
+              ...node,
+              position: node.position, // Use calculated position from initialNodes
+              draggable: true,
+              data: {
+                ...node.data,
+                isEditing,
+              },
+            };
+          } else {
+            // Preserve position if editing didn't change (user might have dragged)
+            return {
+              ...node,
+              position: existingNode.position,
+              draggable: true,
+              data: {
+                ...node.data,
+                isEditing,
+              },
+            };
+          }
         }
-        // For new nodes, all are draggable
+        // For new nodes, use calculated position
         return {
           ...node,
-          draggable: true, // All cards are draggable, even when editing
+          draggable: true,
         };
       });
     });

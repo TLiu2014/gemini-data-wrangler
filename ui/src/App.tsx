@@ -1,5 +1,6 @@
 import { useState, useEffect, Component, useRef } from 'react';
 import type { ReactNode } from 'react';
+import { CheckCircle2, Info, AlertCircle, Loader2, Table2, Settings as SettingsIcon, Database } from 'lucide-react';
 import { initDB } from './db';
 import { SmartTransform } from './SmartTransform';
 import { DynamicChart } from './DynamicChart';
@@ -19,6 +20,9 @@ import * as duckdb from '@duckdb/duckdb-wasm';
 import { mockData, mockSchema } from './mockData';
 import type { TableData, TransformationStage } from './types';
 import { FlowUploadModal } from './FlowUploadModal';
+import { ConfirmDialog } from './ConfirmDialog';
+import { ErrorMessage } from './ErrorMessage';
+import { EmptyState } from './EmptyState';
 import sampleStagesData from './sampleStages.json';
 import html2canvas from 'html2canvas';
 
@@ -78,9 +82,9 @@ function App() {
   const [chatPrompt, setChatPrompt] = useState<string>('');
   const [sampleDataLoaded, setSampleDataLoaded] = useState(false);
   const [showVisualizationPresets, setShowVisualizationPresets] = useState<boolean>(() => {
-    // Load from localStorage, default to true
+    // Load from localStorage, default to false
     const saved = localStorage.getItem('show_visualization_presets');
-    return saved !== null ? saved === 'true' : true;
+    return saved !== null ? saved === 'true' : false;
   });
   // Map stage ID to result table ID
   const [stageToTableMap, setStageToTableMap] = useState<Map<string, string>>(new Map());
@@ -91,6 +95,10 @@ function App() {
   // Flow upload modal state
   const [showFlowUploadModal, setShowFlowUploadModal] = useState(false);
   const [pendingImageFile, setPendingImageFile] = useState<File | null>(null);
+  // Clear flow confirmation dialog state
+  const [showClearFlowDialog, setShowClearFlowDialog] = useState(false);
+  // Toast notification state
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // Get current active table data
   const activeTable = tables.find(t => t.id === activeTableId);
@@ -142,8 +150,9 @@ function App() {
         const blob = new Blob([csvText], { type: 'text/csv' });
         const file = new File([blob], fileInfo.name, { type: 'text/csv' });
         
-        // Generate table name from filename
-        const tableName = `table_${fileInfo.name.replace(/[^a-zA-Z0-9]/g, '_').replace(/\.[^.]*$/, '')}`;
+        // Generate table name from filename - remove extension first, then sanitize
+        const fileNameWithoutExt = fileInfo.name.replace(/\.[^.]*$/, '');
+        const tableName = `table_${fileNameWithoutExt.replace(/[^a-zA-Z0-9]/g, '_')}`;
         const tableId = `table_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         
         const { schema, rows } = await loadFileAsTable(file, tableName);
@@ -210,8 +219,9 @@ function App() {
             const sql = generateSQLFromStage(sampleStage, ordersTable.name);
             
             // Get stage index for table naming
-            // Account for the LOAD stages that were just added (2 load stages + current sample stage index)
-            const stageIndex = loadedTables.length + sampleStages.indexOf(sampleStage);
+            // Account for the LOAD stages that were just added (2 load stages: stage 1 and 2)
+            // The sample stage should be stage 3 (1-based indexing for display)
+            const stageIndex = loadedTables.length + sampleStages.indexOf(sampleStage) + 1;
             const stageTypeLower = sampleStage.type.toLowerCase();
             const resultTableName = `result_stage_${stageIndex}_${stageTypeLower}`;
             
@@ -446,8 +456,9 @@ function App() {
       try {
     setStatus(`Loading ${file.name}...`);
 
-        // Generate table name from filename
-        const tableName = `table_${file.name.replace(/[^a-zA-Z0-9]/g, '_').replace(/\.[^.]*$/, '')}`;
+        // Generate table name from filename - remove extension first, then sanitize
+        const fileNameWithoutExt = file.name.replace(/\.[^.]*$/, '');
+        const tableName = `table_${fileNameWithoutExt.replace(/[^a-zA-Z0-9]/g, '_')}`;
         const tableId = `table_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         
         const { schema, rows } = await loadFileAsTable(file, tableName);
@@ -527,7 +538,7 @@ function App() {
       // Determine the input table for this stage
       // Priority: 1) stage.data.table, 2) previous stage's result table, 3) activeTable, 4) first table
       let defaultTableName = '';
-      
+    
       // For stages that specify a table in their data, use that
       if (stage.data?.table) {
         defaultTableName = stage.data.table;
@@ -681,14 +692,16 @@ function App() {
   };
 
   const handleClearFlow = () => {
-    if (window.confirm('Are you sure you want to clear all transformation stages? This will remove all stages from the flow.')) {
-      setTransformationStages([]);
-      setEditingStageId(null);
-      setNewStage(null);
-      setStageToTableMap(new Map());
-      setChatPrompt('');
-      setStatus('Flow cleared. Ready for new transformations.');
-    }
+    setShowClearFlowDialog(true);
+  };
+
+  const confirmClearFlow = () => {
+    setTransformationStages([]);
+    setEditingStageId(null);
+    setNewStage(null);
+    setStageToTableMap(new Map());
+    setChatPrompt('');
+    setStatus('Flow cleared. Ready for new transformations.');
   };
 
   // Helper function to process flow data (tables and stages)
@@ -709,19 +722,70 @@ function App() {
       setNewStage(null);
       setStageToTableMap(new Map());
       setChatPrompt('');
+      setTables([]); // Clear existing tables when replacing flow
+      setActiveTableId(null); // Clear active table selection
     }
 
     // Create tables in DuckDB and add to app state
     const newTables: TableData[] = [];
-    for (const tableData of tablesFromGemini) {
+    const tableNameMap = new Map<string, string>(); // Map original name to final name
+    
+    // Helper function to clean table names - remove _csv suffix and other file extensions
+    const cleanTableName = (name: string): string => {
+      // Remove common file extension suffixes like _csv, _xlsx, etc.
+      return name.replace(/_csv$/, '').replace(/_xlsx$/, '').replace(/_xls$/, '').replace(/_txt$/, '');
+    };
+    
+    // Helper function to clean descriptions - remove _csv suffixes from table names in descriptions
+    const cleanDescription = (description: string): string => {
+      if (!description) return description;
+      // Replace table names with _csv suffix in descriptions
+      // Pattern: 'table_name_csv' or "table_name_csv" or table_name_csv
+      return description
+        .replace(/(['"]?)(table_\w+)_csv\1/g, '$1$2$1') // Remove _csv from quoted table_ prefixed names
+        .replace(/(['"]?)(\w+)_csv\1/g, '$1$2$1') // Remove _csv from quoted or unquoted table names
+        .replace(/(table_\w+)_csv/g, '$1') // Remove _csv from table_ prefixed names (unquoted)
+        .replace(/\b(\w+)_csv\b/g, '$1'); // Remove _csv from any word ending with _csv
+    };
+    
+    // Filter out result tables that Gemini incorrectly includes in the tables array
+    const actualSourceTables = tablesFromGemini.filter(t => !t.name.startsWith('result_stage_'));
+    console.log(`Filtered tables: ${tablesFromGemini.length} -> ${actualSourceTables.length} (removed ${tablesFromGemini.length - actualSourceTables.length} result tables)`);
+    
+    for (const tableData of actualSourceTables) {
       const tableId = `table_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+      // Clean the table name from Gemini (remove _csv suffix if present)
+      const cleanedName = cleanTableName(tableData.name);
+      
+      // Ensure table name is unique - if not clearing existing, check for conflicts
+      let finalTableName = cleanedName;
+      if (!shouldClearExisting) {
+        // Check if table name already exists in DuckDB or in new tables
+        const existingTableNames = new Set(tables.map(t => t.name));
+        const newTableNames = new Set(newTables.map(t => t.name));
+        let counter = 1;
+        while (existingTableNames.has(finalTableName) || newTableNames.has(finalTableName)) {
+          finalTableName = `${tableData.name}_${counter}`;
+          counter++;
+        }
+      }
+      
+      // Store mapping from original to final name (use cleaned name for mapping)
+      if (finalTableName !== cleanedName) {
+        tableNameMap.set(cleanedName, finalTableName);
+      }
+      // Also map from original name if it was different
+      if (cleanedName !== tableData.name) {
+        tableNameMap.set(tableData.name, finalTableName);
+      }
       
       // Create table in DuckDB
       const columnsDef = tableData.columns.map((col: any) => 
         `${col.name} ${col.type || 'VARCHAR'}`
       ).join(', ');
       
-      await conn.query(`CREATE OR REPLACE TABLE ${tableData.name} (${columnsDef})`);
+      await conn.query(`CREATE OR REPLACE TABLE ${finalTableName} (${columnsDef})`);
       
       // Insert sample data
       if (tableData.rows && tableData.rows.length > 0) {
@@ -738,19 +802,19 @@ function App() {
             if (typeof value === 'string') return `'${value.replace(/'/g, "''")}'`;
             return String(value);
           }).join(', ');
-          await conn.query(`INSERT INTO ${tableData.name} (${columns}) VALUES (${values})`);
+          await conn.query(`INSERT INTO ${finalTableName} (${columns}) VALUES (${values})`);
         }
       }
 
       // Get all rows for display
-      const result = await conn.query(`SELECT * FROM ${tableData.name}`);
+      const result = await conn.query(`SELECT * FROM ${finalTableName}`);
       const rows = result.toArray().map(r => r.toJSON());
-      const schemaRes = await conn.query(`DESCRIBE ${tableData.name}`);
+      const schemaRes = await conn.query(`DESCRIBE ${finalTableName}`);
       const schema = schemaRes.toArray().map(r => r.toJSON());
 
       const newTable: TableData = {
         id: tableId,
-        name: tableData.name,
+        name: finalTableName,
         fileName: `Generated from flow diagram`,
         schema,
         rows,
@@ -772,17 +836,80 @@ function App() {
 
     // Process transformation stages
     if (stagesFromGemini && Array.isArray(stagesFromGemini) && stagesFromGemini.length > 0) {
-      // Convert Gemini stages to TransformationStage format
-      const newStages: TransformationStage[] = stagesFromGemini.map((stage: any) => ({
-        id: stage.id || `stage_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-        type: stage.type,
-        description: stage.description,
-        timestamp: new Date(),
-        data: {
-          ...stage.data,
-          ...(horizontalOffset > 0 && { flowGroupId: `flow_${Date.now()}`, horizontalOffset })
+      // Filter out LOAD stages for result tables (Gemini sometimes includes them incorrectly)
+      const validStages = stagesFromGemini.filter(stage => {
+        if (stage.type === 'LOAD' && stage.data?.tableName?.startsWith('result_stage_')) {
+          console.log(`⚠️ Filtered out invalid LOAD stage for result table: ${stage.data.tableName}`);
+          return false;
         }
-      }));
+        return true;
+      });
+      console.log(`Filtered stages: ${stagesFromGemini.length} -> ${validStages.length} (removed ${stagesFromGemini.length - validStages.length} invalid LOAD stages)`);
+      
+      // Convert Gemini stages to TransformationStage format
+      // Update table references in stage data to use final table names
+      const newStages: TransformationStage[] = validStages.map((stage: any, index: number) => {
+        const stageData = { ...stage.data };
+        
+        // Helper to clean and resolve table name
+        const resolveTableReference = (tableName: string): string => {
+          if (!tableName) return tableName;
+          // Check if exact name is in map
+          if (tableNameMap.has(tableName)) {
+            return tableNameMap.get(tableName)!;
+          }
+          // Try cleaned version (without _csv suffix)
+          const cleaned = cleanTableName(tableName);
+          if (cleaned !== tableName) {
+            if (tableNameMap.has(cleaned)) {
+              return tableNameMap.get(cleaned)!;
+            }
+            // Check if cleaned name matches any existing table
+            const matchingTable = newTables.find(t => t.name === cleaned);
+            if (matchingTable) {
+              return matchingTable.name;
+            }
+          }
+          // Return cleaned name as fallback
+          return cleaned;
+        };
+        
+        // Update table references if tables were renamed or have suffixes
+        // Update table references in stage data
+        if (stageData.table) {
+          stageData.table = resolveTableReference(stageData.table);
+        }
+        if (stageData.tableName) {
+          stageData.tableName = resolveTableReference(stageData.tableName);
+        }
+        if (stageData.leftTable) {
+          stageData.leftTable = resolveTableReference(stageData.leftTable);
+        }
+        if (stageData.rightTable) {
+          stageData.rightTable = resolveTableReference(stageData.rightTable);
+        }
+        if (stageData.tables && Array.isArray(stageData.tables)) {
+          stageData.tables = stageData.tables.map((t: string) => resolveTableReference(t));
+        }
+        
+        // Use stage ID from Gemini (should be sequential now that we've instructed Gemini properly)
+        // Only generate a fallback ID if Gemini didn't provide one
+        const stageId = stage.id || `stage_${index + 1}`;
+        if (!stage.id) {
+          console.warn(`Stage ${index} (${stage.type}: ${stage.description}) missing ID from Gemini, generated: ${stageId}`);
+        }
+        
+        return {
+          id: stageId,
+          type: stage.type,
+          description: cleanDescription(stage.description || ''),
+          timestamp: new Date(),
+          data: {
+            ...stageData,
+            ...(horizontalOffset > 0 && { flowGroupId: `flow_${Date.now()}`, horizontalOffset })
+          }
+        };
+      });
 
       // Add stages to app state
       if (shouldClearExisting) {
@@ -794,18 +921,396 @@ function App() {
       // Execute all stages to generate result tables
       setStatus('Executing transformation stages...');
       
-      const existingStagesCount = shouldClearExisting ? 0 : transformationStages.length;
+      // Track result tables from previous stages for proper table references
+      const stageResultTableMap = new Map<string, string>(); // stageId -> tableName
+      const newStageToTableIdMap = new Map<string, string>(); // stageId -> tableId (for UI state)
+      let previousResultTableName: string | null = null;
+      
+      // First, map LOAD stages to their corresponding loaded tables
+      let lastLoadTableName: string | null = null;
       for (let i = 0; i < newStages.length; i++) {
         const stage = newStages[i];
-        if (stage.type === 'LOAD') continue;
+        if (stage.type === 'LOAD' && stage.data?.tableName) {
+          // Find the table that was loaded for this LOAD stage
+          const tableName = stage.data.tableName;
+          const loadTable = newTables.find(t => t.name === tableName) || 
+                          tables.find(t => t.name === tableName);
+          if (loadTable) {
+            newStageToTableIdMap.set(stage.id, loadTable.id);
+            stageResultTableMap.set(stage.id, loadTable.name);
+            lastLoadTableName = loadTable.name; // Track the last LOAD stage's table
+          }
+        }
+      }
+      
+      // Set previousResultTableName to the last LOAD stage's table if available
+      if (lastLoadTableName) {
+        previousResultTableName = lastLoadTableName;
+      }
+      
+      // Execute non-LOAD stages in order
+      const existingStagesCount = shouldClearExisting ? 0 : transformationStages.length;
+      let executedStageIndex = 0;
+      let lastExecutedTableId: string | null = null; // Track the result table ID of the last successfully executed stage
+      
+      console.log('\n=== Starting stage execution ===');
+      console.log(`Total stages: ${newStages.length}`);
+      console.log(`LOAD stages: ${newStages.filter(s => s.type === 'LOAD').length}`);
+      console.log(`Non-LOAD stages to execute: ${newStages.filter(s => s.type !== 'LOAD').length}`);
+      console.log(`Existing tables: ${tables.map(t => t.name).join(', ')}`);
+      console.log(`New tables: ${newTables.map(t => t.name).join(', ')}`);
+      console.log(`LOAD stage mappings: ${Array.from(newStageToTableIdMap.entries()).map(([sid, tid]) => `${sid}->${tid}`).join(', ')}`);
+      
+      // Collect all result tables to add them in a batch
+      const resultTablesToAdd: TableData[] = [];
+      
+      for (let i = 0; i < newStages.length; i++) {
+        const stage = newStages[i];
+        // Skip LOAD stages during execution (tables are already loaded)
+        if (stage.type === 'LOAD') {
+          console.log(`Skipping LOAD stage ${i}: ${stage.id} (${stage.description})`);
+          continue;
+        }
+        
+        console.log(`\n--- Executing stage ${executedStageIndex}: ${stage.id} (${stage.type}) ---`);
+        console.log(`Description: ${stage.description}`);
+        console.log(`Stage data:`, JSON.stringify(stage.data, null, 2));
+        
+        // Fallback logic to fix incomplete stage data from Gemini
+        if (stage.type === 'JOIN' && stage.data) {
+          // If value is provided but leftKey/rightKey are missing, use value for both
+          // BUT reject invalid values like "none", "null", empty string
+          const invalidValues = ['none', 'null', '', 'undefined', 'n/a'];
+          if (stage.data.value && 
+              !invalidValues.includes(String(stage.data.value).toLowerCase()) &&
+              (!stage.data.leftKey || !stage.data.rightKey)) {
+            console.log(`⚠️ JOIN stage missing leftKey/rightKey, using value: ${stage.data.value}`);
+            stage.data.leftKey = stage.data.value as string;
+            stage.data.rightKey = stage.data.value as string;
+          }
+          
+          // If leftKey or rightKey are still missing, try to infer from description
+          if (!stage.data.leftKey || !stage.data.rightKey) {
+            console.log(`⚠️ JOIN stage missing leftKey/rightKey, attempting to infer from description...`);
+            const desc = stage.description.toLowerCase();
+            
+            // Common join key patterns in descriptions
+            let inferredKey: string | null = null;
+            
+            if (desc.includes('customer_id') || desc.includes('customer id')) {
+              inferredKey = 'customer_id';
+            } else if (desc.includes('order_id') || desc.includes('order id')) {
+              inferredKey = 'order_id';
+            } else if (desc.includes('product_id') || desc.includes('product id')) {
+              inferredKey = 'product_id';
+            } else if (desc.includes('user_id') || desc.includes('user id')) {
+              inferredKey = 'user_id';
+            } else if (desc.includes('id')) {
+              // Generic ID mention - try to extract the specific column
+              const idMatch = desc.match(/(\w+)_?id/);
+              if (idMatch) {
+                inferredKey = idMatch[0].replace(/\s/g, '_');
+              } else {
+                inferredKey = 'id'; // Fallback to just 'id'
+              }
+            }
+            
+            if (inferredKey) {
+              console.log(`  Inferred join key: ${inferredKey}`);
+              if (!stage.data.leftKey) stage.data.leftKey = inferredKey;
+              if (!stage.data.rightKey) stage.data.rightKey = inferredKey;
+            } else {
+              // Absolute fallback - use 'id'
+              console.log(`  Using fallback join key: id`);
+              if (!stage.data.leftKey) stage.data.leftKey = 'id';
+              if (!stage.data.rightKey) stage.data.rightKey = 'id';
+            }
+          }
+          
+          // Ensure joinType is set
+          if (!stage.data.joinType) {
+            stage.data.joinType = 'INNER';
+          }
+        }
+        
+        if (stage.type === 'FILTER' && stage.data) {
+          // If value is provided but column/operator are missing, try to infer from description
+          if (stage.data.value && !stage.data.column) {
+            console.log(`⚠️ FILTER stage missing column/operator, attempting to infer...`);
+            // Try to extract column and operator from description
+            const desc = stage.description.toLowerCase();
+            const value = String(stage.data.value);
+            
+            // Check if value is numeric
+            const isNumeric = !isNaN(Number(value)) && value.trim() !== '';
+            
+            // Common patterns: "filter by X", "where X >", "X > value", "high value orders", "active status"
+            if (isNumeric) {
+              // Numeric value - likely filtering on amount, price, count, etc.
+              if (desc.includes('amount') || desc.includes('value') || desc.includes('price')) {
+                stage.data.column = 'amount';
+                stage.data.operator = '>';
+                console.log(`  Inferred (numeric): column=amount, operator=>, value=${stage.data.value}`);
+              } else if (desc.includes('date')) {
+                stage.data.column = 'date';
+                stage.data.operator = '>';
+                console.log(`  Inferred (numeric): column=date, operator=>, value=${stage.data.value}`);
+              } else {
+                // Default fallback for numeric
+                stage.data.column = 'amount';
+                stage.data.operator = '>';
+                console.log(`  Using default (numeric): column=amount, operator=>, value=${stage.data.value}`);
+              }
+            } else {
+              // String value - likely filtering on status, category, name, etc.
+              if (desc.includes('status') || desc.includes('active') || desc.includes('inactive')) {
+                stage.data.column = 'status';
+                stage.data.operator = '=';
+                console.log(`  Inferred (string): column=status, operator==, value=${stage.data.value}`);
+              } else if (desc.includes('category') || desc.includes('type')) {
+                stage.data.column = 'category';
+                stage.data.operator = '=';
+                console.log(`  Inferred (string): column=category, operator==, value=${stage.data.value}`);
+              } else if (desc.includes('name')) {
+                stage.data.column = 'name';
+                stage.data.operator = 'LIKE';
+                console.log(`  Inferred (string): column=name, operator=LIKE, value=${stage.data.value}`);
+              } else {
+                // Default fallback for string - use equality check on status
+                stage.data.column = 'status';
+                stage.data.operator = '=';
+                console.log(`  Using default (string): column=status, operator==, value=${stage.data.value}`);
+              }
+            }
+          } else if (!stage.data.value && !stage.data.column && !stage.data.conditions) {
+            // No filter criteria at all - infer from description
+            console.log(`⚠️ FILTER stage has no filter criteria, inferring from description...`);
+            const desc = stage.description.toLowerCase();
+            
+            // Try to infer meaningful filters based on description
+            if (desc.includes('high') && (desc.includes('amount') || desc.includes('value') || desc.includes('order'))) {
+              // "high value orders", "high amount", etc.
+              stage.data.column = 'amount';
+              stage.data.operator = '>';
+              stage.data.value = '100';
+              console.log(`  Inferred: Filter high amounts -> amount > 100`);
+            } else if (desc.includes('low') && (desc.includes('amount') || desc.includes('value') || desc.includes('order'))) {
+              stage.data.column = 'amount';
+              stage.data.operator = '<';
+              stage.data.value = '100';
+              console.log(`  Inferred: Filter low amounts -> amount < 100`);
+            } else if (desc.includes('active') || desc.includes('status')) {
+              // "active records", "filter by status", etc.
+              stage.data.column = 'status';
+              stage.data.operator = '=';
+              stage.data.value = 'active';
+              console.log(`  Inferred: Filter active status -> status = 'active'`);
+            } else if (desc.includes('recent') && desc.includes('date')) {
+              stage.data.column = 'order_date';
+              stage.data.operator = '>';
+              stage.data.value = '2023-01-01';
+              console.log(`  Inferred: Filter recent dates -> order_date > '2023-01-01'`);
+            } else if (desc.includes('large') || desc.includes('big')) {
+              stage.data.column = 'amount';
+              stage.data.operator = '>';
+              stage.data.value = '500';
+              console.log(`  Inferred: Filter large amounts -> amount > 500`);
+            } else {
+              // Generic fallback - filter for positive amounts (most common use case)
+              stage.data.column = 'amount';
+              stage.data.operator = '>';
+              stage.data.value = '0';
+              console.log(`  Using generic fallback: amount > 0 (filter positive amounts)`);
+            }
+          }
+        }
 
         try {
-          const stageIndex = existingStagesCount + i;
-          const defaultTableName = newTables.length > 0 ? newTables[0].name : (tables.length > 0 ? tables[0].name : '');
-          const sql = generateSQLFromStage(stage, defaultTableName);
+          // Helper function to clean table names - remove _csv suffix and other file extensions
+          const cleanTableNameLocal = (name: string): string => {
+            return name.replace(/_csv$/, '').replace(/_xlsx$/, '').replace(/_xls$/, '').replace(/_txt$/, '');
+          };
+
+          // Helper function to resolve table name - check if it's a result table from a previous stage
+          const resolveTableName = async (tableName: string): Promise<string> => {
+            // First, try to clean the table name (remove _csv suffix)
+            const cleanedTableName = cleanTableNameLocal(tableName);
+            
+            // Check if this is mapped in tableNameMap
+            if (tableNameMap.has(tableName)) {
+              return tableNameMap.get(tableName)!;
+            }
+            if (cleanedTableName !== tableName && tableNameMap.has(cleanedTableName)) {
+              return tableNameMap.get(cleanedTableName)!;
+            }
+            
+            // Check if this table name matches a previous stage's result table
+            for (const [_stageId, resultTableName] of stageResultTableMap.entries()) {
+              if (resultTableName === tableName || resultTableName === cleanedTableName) {
+                return resultTableName;
+              }
+            }
+            
+            // Check if it's a loaded table (try both original and cleaned name)
+            let loadedTable = newTables.find(t => t.name === tableName) || tables.find(t => t.name === tableName);
+            if (!loadedTable && cleanedTableName !== tableName) {
+              loadedTable = newTables.find(t => t.name === cleanedTableName) || tables.find(t => t.name === cleanedTableName);
+            }
+            if (loadedTable) {
+              return loadedTable.name;
+            }
+            
+            // Check if table actually exists in database (try cleaned name first, then original)
+            try {
+              await conn.query(`SELECT 1 FROM ${cleanedTableName} LIMIT 1`);
+              return cleanedTableName; // Table exists
+            } catch (e) {
+              // Try original name
+              try {
+                await conn.query(`SELECT 1 FROM ${tableName} LIMIT 1`);
+                return tableName; // Table exists
+              } catch (e2) {
+                // Table doesn't exist - fallback to previousResultTableName if available
+                console.log(`⚠️ Table ${tableName} (cleaned: ${cleanedTableName}) not found in database, using previous result: ${previousResultTableName}`);
+                return previousResultTableName || cleanedTableName;
+              }
+            }
+          };
+          
+          // Determine the input table for this stage
+          let inputTableName = '';
+          
+          // For JOIN stages, they specify their own tables
+          if (stage.type === 'JOIN') {
+            if (stage.data?.leftTable && stage.data?.rightTable) {
+              // Resolve both table names
+              const resolvedLeft = await resolveTableName(stage.data.leftTable);
+              const resolvedRight = await resolveTableName(stage.data.rightTable);
+              // Update stage data with resolved table names
+              if (!stage.data) stage.data = {};
+              stage.data.leftTable = resolvedLeft;
+              stage.data.rightTable = resolvedRight;
+              inputTableName = resolvedLeft; // Just for SQL generation, actual tables are in stage.data
+            } else {
+              // Fallback if tables not specified
+              inputTableName = previousResultTableName || (newTables.length > 0 ? newTables[0].name : (tables.length > 0 ? tables[0].name : ''));
+            }
+          } else if (stage.type === 'UNION') {
+            // UNION stages specify their own tables
+            if (stage.data?.tables && stage.data.tables.length > 0) {
+              // Resolve all table names
+              if (!stage.data) stage.data = {};
+              const stageTables = stage.data.tables;
+              if (stageTables) {
+                stage.data.tables = await Promise.all(stageTables.map((t: string) => resolveTableName(t)));
+                inputTableName = stage.data.tables[0]; // Just for SQL generation
+              }
+            } else {
+              inputTableName = previousResultTableName || (newTables.length > 0 ? newTables[0].name : (tables.length > 0 ? tables[0].name : ''));
+            }
+          } else if (stage.data?.table) {
+            // Stage explicitly specifies its input table - resolve it
+            inputTableName = await resolveTableName(stage.data.table);
+            if (!stage.data) stage.data = {};
+            stage.data.table = inputTableName; // Update stage data with resolved name
+          } else if (previousResultTableName) {
+            // Use the previous stage's result table
+            inputTableName = previousResultTableName;
+            // Update stage data to reference the previous result table
+            if (!stage.data) stage.data = {};
+            stage.data.table = previousResultTableName;
+          } else {
+            // Fallback to first available table
+            inputTableName = newTables.length > 0 ? newTables[0].name : (tables.length > 0 ? tables[0].name : '');
+            if (!stage.data) stage.data = {};
+            stage.data.table = inputTableName;
+          }
+          
+          if (!inputTableName) {
+            console.error('❌ Could not determine input table for stage!');
+            throw new Error('Could not determine input table for stage.');
+          }
+          
+          console.log(`Input table determined: ${inputTableName}`);
+          console.log(`Previous result table: ${previousResultTableName}`);
+          console.log(`Stage data before SQL generation:`, JSON.stringify(stage.data, null, 2));
+          
+          // For FILTER stages, validate that the column exists in the table
+          if (stage.type === 'FILTER' && stage.data?.column) {
+            try {
+              // Query the table schema to get available columns
+              const schemaRes = await conn.query(`DESCRIBE ${inputTableName}`);
+              const tableSchema = schemaRes.toArray().map(r => r.toJSON());
+              const availableColumns = tableSchema.map((col: any) => 
+                (col.column_name || col.name || '').toLowerCase()
+              );
+              
+              console.log(`  Available columns in ${inputTableName}:`, availableColumns.join(', '));
+              
+              const targetColumn = (stage.data.column as string).toLowerCase();
+              
+              // Check if the target column exists
+              if (!availableColumns.includes(targetColumn)) {
+                console.log(`  ⚠️ Column '${stage.data.column}' not found in table!`);
+                
+                // Try to find a suitable alternative column
+                let alternativeColumn: string | null = null;
+                const value = stage.data.value ? String(stage.data.value) : '';
+                const isNumeric = !isNaN(Number(value)) && value.trim() !== '';
+                
+                if (isNumeric) {
+                  // For numeric values, prefer numeric columns like amount, price, quantity, etc.
+                  alternativeColumn = availableColumns.find(col => 
+                    col.includes('amount') || col.includes('price') || col.includes('quantity') || 
+                    col.includes('total') || col.includes('cost')
+                  ) || null;
+                } else {
+                  // For string values, prefer string columns like status, name, category, etc.
+                  alternativeColumn = availableColumns.find(col => 
+                    col.includes('status') || col.includes('name') || col.includes('category') || 
+                    col.includes('type') || col.includes('description')
+                  ) || null;
+                }
+                
+                if (alternativeColumn) {
+                  console.log(`  Using alternative column: ${alternativeColumn}`);
+                  stage.data.column = alternativeColumn;
+                  
+                  // Adjust operator if needed
+                  if (isNumeric) {
+                    stage.data.operator = '>';
+                  } else {
+                    // For string columns, use LIKE for more flexible matching
+                    stage.data.operator = 'LIKE';
+                    // Add wildcards for LIKE if not already present
+                    if (!value.includes('%')) {
+                      stage.data.value = `%${value}%`;
+                    }
+                  }
+                } else {
+                  console.log(`  No suitable alternative column found. Using first available column: ${availableColumns[0]}`);
+                  // Fallback to first available column with generic filter
+                  stage.data.column = availableColumns[0];
+                  stage.data.operator = '>';
+                  stage.data.value = '0';
+                }
+              }
+            } catch (err) {
+              console.warn(`  Could not validate column, proceeding anyway:`, err);
+            }
+          }
+          
+          // Generate SQL from the stage
+          const sql = generateSQLFromStage(stage, inputTableName);
+          console.log(`Generated SQL: ${sql}`);
+          
+          // Extract stage number from stage ID (e.g., "stage_3" -> 3)
+          // This ensures result table name matches the stage ID
+          const stageIdMatch = stage.id.match(/stage_(\d+)/);
+          const stageNumber = stageIdMatch ? parseInt(stageIdMatch[1]) : (existingStagesCount + i);
           
           const stageTypeLower = stage.type.toLowerCase();
-          const resultTableName = `result_stage_${stageIndex}_${stageTypeLower}`;
+          const resultTableName = `result_stage_${stageNumber}_${stageTypeLower}`;
           await conn.query(`CREATE OR REPLACE TABLE ${resultTableName} AS ${sql}`);
           
           const result = await conn.query(`SELECT * FROM ${resultTableName} LIMIT 1000`);
@@ -813,7 +1318,8 @@ function App() {
           const schemaRes = await conn.query(`DESCRIBE ${resultTableName}`);
           const resultSchema = schemaRes.toArray().map(r => r.toJSON());
           
-          const resultTableId = `table_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+          // Generate unique table ID with stage ID and index to ensure uniqueness
+          const resultTableId = `table_${stage.id}_${executedStageIndex}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
           const resultTable: TableData = {
             id: resultTableId,
             name: resultTableName,
@@ -823,21 +1329,60 @@ function App() {
             createdAt: new Date()
           };
           
-          setTables(prev => [...prev, resultTable]);
-          setStageToTableMap(prev => {
-            const newMap = new Map(prev);
-            newMap.set(stage.id, resultTableId);
-            return newMap;
-          });
+          // Collect result table to add in batch later
+          resultTablesToAdd.push(resultTable);
+          newStageToTableIdMap.set(stage.id, resultTableId);
           
-          if (i === newStages.length - 1) {
-            setActiveTableId(resultTableId);
-          }
+          console.log(`✅ Stage executed successfully!`);
+          console.log(`  Result table: ${resultTableName} (ID: ${resultTableId})`);
+          console.log(`  Rows: ${resultRows.length}`);
+          console.log(`  Mapping added: ${stage.id} -> ${resultTableId}`);
+          
+          // Track this stage's result table for future stages to reference
+          stageResultTableMap.set(stage.id, resultTableName);
+          previousResultTableName = resultTableName;
+          lastExecutedTableId = resultTableId; // Track this as the last executed stage's result table
+          
         } catch (err) {
-          console.warn(`Error executing stage ${stage.id}:`, err);
+          console.error(`❌ Error executing stage ${stage.id}:`, err);
+          console.error(`  Stage type: ${stage.type}`);
+          console.error(`  Stage description: ${stage.description}`);
+          console.error(`  Error details:`, err instanceof Error ? err.message : err);
           setError(`Warning: Failed to execute stage "${stage.description}": ${err instanceof Error ? err.message : 'Unknown error'}`);
+          // Continue to next stage even if this one failed
         }
       }
+      
+      console.log('\n=== Stage execution complete ===');
+      console.log(`Total result tables created: ${resultTablesToAdd.length}`);
+      console.log(`Result table IDs: ${resultTablesToAdd.map(t => `${t.name}(${t.id})`).join(', ')}`);
+      
+      // Add all result tables in a single batch update
+      if (resultTablesToAdd.length > 0) {
+        setTables(prev => [...prev, ...resultTablesToAdd]);
+      }
+      
+      // Set the last executed stage's result table as active
+      if (lastExecutedTableId) {
+        setActiveTableId(lastExecutedTableId);
+      }
+
+      // Update the stageToTableMap with all the new mappings
+      console.log('\n=== Updating stageToTableMap ===');
+      console.log(`Previous map size: ${stageToTableMap.size}`);
+      console.log(`New mappings to add: ${newStageToTableIdMap.size}`);
+      newStageToTableIdMap.forEach((tableId, stageId) => {
+        console.log(`  ${stageId} -> ${tableId}`);
+      });
+      
+      setStageToTableMap(prev => {
+        const updatedMap = new Map(prev);
+        newStageToTableIdMap.forEach((tableId, stageId) => {
+          updatedMap.set(stageId, tableId);
+        });
+        console.log(`Updated map size: ${updatedMap.size}`);
+        return updatedMap;
+      });
 
       setStatus(`Flow diagram analyzed! Created ${newTables.length} table(s) and ${newStages.length} stage(s).`);
     } else {
@@ -1112,6 +1657,70 @@ function App() {
         formData.append('apiKey', apiKey);
       }
 
+      // Send existing flow context if there are tables or stages
+      const hasExistingFlow = tables.length > 0 || transformationStages.length > 0;
+      if (hasExistingFlow) {
+        // Mark which tables are result tables from stages
+        const resultTableIds = new Set(Array.from(stageToTableMap.values()));
+        
+        // Find the latest result table to mark it for high-priority connection
+        // Get the last stage that has a result table
+        let latestResultTableId: string | null = null;
+        for (let i = transformationStages.length - 1; i >= 0; i--) {
+          const stage = transformationStages[i];
+          if (stageToTableMap.has(stage.id)) {
+            latestResultTableId = stageToTableMap.get(stage.id)!;
+            break;
+          }
+        }
+
+        // Build stage-to-table mapping for context
+        const stageToTableInfo: Array<{ stageId: string; stageType: string; stageDescription: string; resultTableName: string }> = [];
+        transformationStages.forEach((stage) => {
+          const resultTableId = stageToTableMap.get(stage.id);
+          if (resultTableId) {
+            const resultTable = tables.find(t => t.id === resultTableId);
+            if (resultTable) {
+              stageToTableInfo.push({
+                stageId: stage.id,
+                stageType: stage.type,
+                stageDescription: stage.description,
+                resultTableName: resultTable.name
+              });
+            }
+          }
+        });
+
+        const context = {
+          existingTables: tables.map(t => {
+            const isResultTable = resultTableIds.has(t.id);
+            const isLatestResultTable = t.id === latestResultTableId;
+            return {
+              name: t.name,
+              columns: t.schema.map((col: any) => ({ 
+                name: col.name || col.column_name, 
+                type: col.type || col.column_type || col.data_type 
+              })),
+              isResultTable,
+              isLatestResultTable,
+            };
+          }),
+          existingStages: transformationStages.map((s, index) => ({
+            id: s.id,
+            index,
+            type: s.type,
+            description: s.description,
+            resultTableName: stageToTableMap.has(s.id) 
+              ? tables.find(t => t.id === stageToTableMap.get(s.id))?.name 
+              : null
+          })),
+          stageToTableInfo, // Additional mapping for clarity
+          latestStageIndex: transformationStages.length > 0 ? transformationStages.length - 1 : null,
+        };
+
+        formData.append('context', JSON.stringify(context));
+      }
+
       // Send to server for analysis
       const response = await fetch('/api/analyze-flow-image', {
         method: 'POST',
@@ -1146,6 +1755,20 @@ function App() {
 
       const { imageType, explanation, tables: tablesFromGemini, transformationStages: stagesFromGemini } = responseData;
 
+      console.log('\n=== Gemini Response ===');
+      console.log('Image type:', imageType);
+      console.log('Tables returned:', tablesFromGemini?.length || 0);
+      console.log('Stages returned:', stagesFromGemini?.length || 0);
+      if (stagesFromGemini && stagesFromGemini.length > 0) {
+        console.log('Stage details from Gemini:');
+        stagesFromGemini.forEach((stage: any, idx: number) => {
+          console.log(`  Stage ${idx + 1}: ${stage.type} - ${stage.description}`);
+          console.log(`    ID: ${stage.id}`);
+          console.log(`    Data:`, JSON.stringify(stage.data, null, 2));
+        });
+      }
+      console.log('======================\n');
+
       // Always set the explanation
       setImageExplanation(explanation || 'No explanation provided.');
 
@@ -1162,30 +1785,68 @@ function App() {
           throw new Error('No tables found in the image');
         }
 
+        // For stage_flow images, allow LOAD stages (they represent initial table loads in the flow)
+        // For data_table images, filter out LOAD stages (tables are loaded automatically)
+        const filteredStages = stagesFromGemini && Array.isArray(stagesFromGemini) 
+          ? (imageType === 'stage_flow' 
+              ? stagesFromGemini // Keep all stages including LOAD for flow images
+              : stagesFromGemini.filter((stage: any) => stage.type !== 'LOAD')) // Filter LOAD for data_table
+          : [];
+
         // For stage_flow, process based on action or default behavior
-        if (imageType === 'stage_flow' && stagesFromGemini && Array.isArray(stagesFromGemini) && stagesFromGemini.length > 0) {
+        if (imageType === 'stage_flow') {
+          // Process stage_flow regardless of whether stages exist (they might all be filtered out)
           if (action === 'replace') {
             // Replace current flow
-            await processFlowData(tablesFromGemini, stagesFromGemini, true, 0);
+            await processFlowData(tablesFromGemini, filteredStages, true, 0);
             setStatus('Flow replaced successfully.');
           } else if (action === 'add') {
             // Add side-by-side
             const horizontalOffset = transformationStages.length > 0 ? 400 : 0;
-            await processFlowData(tablesFromGemini, stagesFromGemini, false, horizontalOffset);
+            await processFlowData(tablesFromGemini, filteredStages, false, horizontalOffset);
             setStatus('Flow added successfully.');
           } else {
             // No action specified - process directly (no existing stages)
-            await processFlowData(tablesFromGemini, stagesFromGemini, false, 0);
+            await processFlowData(tablesFromGemini, filteredStages, false, 0);
             setStatus('Flow loaded successfully.');
           }
         } else if (imageType === 'data_table') {
-          // Process data table directly
-          await processFlowData(tablesFromGemini, [], false, 0);
-          setStatus('Table loaded successfully.');
-        } else if (imageType === 'stage_flow') {
-          // Process stage flow directly (no stages from Gemini)
-          await processFlowData(tablesFromGemini, [], false, 0);
-          setStatus('Flow loaded successfully.');
+          // Check if there's existing flow - if so, always try to integrate
+          const hasExistingFlow = tables.length > 0 || transformationStages.length > 0;
+          
+          if (hasExistingFlow) {
+            // Table with existing flow context - NEVER replace, always append
+            if (filteredStages.length > 0) {
+              // Gemini found connections and generated integration stages
+              // Always append to existing flow (never replace)
+              await processFlowData(tablesFromGemini, filteredStages, false, 0);
+              setStatus('✅ Table integrated into flow! Gemini found connections and created integration stages.');
+            } else {
+              // Has existing flow but no integration stages generated
+              // This means Gemini couldn't find connections
+              // Just add the new table(s) without any stages - don't replace anything
+              await processFlowData(tablesFromGemini, [], false, 0);
+              
+              // Provide detailed feedback about what went wrong
+              const newTableColumns = tablesFromGemini[0]?.columns?.map((c: any) => c.name).join(', ') || 'unknown';
+              const existingTableColumns = tables.length > 0 
+                ? tables[0].schema.map((c: any) => c.name || c.column_name).join(', ') 
+                : 'none';
+              
+              setStatus('⚠️ Table loaded, but Gemini found no connections with existing flow.');
+              setError(
+                `Could not find automatic connections. Here's what we have:\n\n` +
+                `New table columns: ${newTableColumns}\n` +
+                `Existing table columns: ${existingTableColumns}\n\n` +
+                `Tip: Check if column names match (case-insensitive). Common join keys include: ` +
+                `customer_id, order_id, product_id, email, etc. You may need to manually create JOIN stages.`
+              );
+            }
+          } else {
+            // No existing flow - just load the table
+            await processFlowData(tablesFromGemini, [], false, 0);
+            setStatus('Table loaded successfully. This is the first table in your flow.');
+          }
         }
       } else if (imageType === 'schema') {
         setStatus('Schema image analyzed - see explanation below.');
@@ -1393,21 +2054,34 @@ function App() {
         <MenuBar
           apiKey={apiKey}
           onApiKeySet={handleApiKeySet}
-          status={status}
-          tablesCount={tables.length}
-          stagesCount={transformationStages.length}
           hasDefaultApiKey={hasDefaultApiKey}
           showVisualizationPresets={showVisualizationPresets}
           onToggleVisualizationPresets={(value) => {
             setShowVisualizationPresets(value);
             localStorage.setItem('show_visualization_presets', String(value));
           }}
+          flowUploadAction={(() => {
+            const saved = localStorage.getItem('flow_upload_preference');
+            if (!saved) return 'replace';
+            const pref = JSON.parse(saved);
+            return pref.action === 'add' ? 'add' : 'replace';
+          })()}
+          onFlowUploadActionChange={(action) => {
+            localStorage.setItem('flow_upload_preference', JSON.stringify({ action }));
+          }}
+          askBeforeLoad={(() => {
+            const saved = localStorage.getItem('flow_upload_ask_before');
+            return saved === null ? true : saved === 'true';
+          })()}
+          onAskBeforeLoadChange={(value) => {
+            localStorage.setItem('flow_upload_ask_before', String(value));
+          }}
         />
 
       {/* Main Content Layout */}
       <div style={{ 
         width: '100%',
-        padding: '10px', 
+        padding: '12px', 
         flex: 1,
         height: 'calc(100vh - 80px)',
         boxSizing: 'border-box'
@@ -1421,10 +2095,10 @@ function App() {
             <div style={{
               position: 'sticky',
               top: '0',
-              height: '85vh',
-              maxHeight: '85vh',
+              minHeight: '400px',
+              maxHeight: 'calc(100vh - 100px)',
               overflowY: 'auto',
-              paddingRight: '10px'
+              paddingRight: '12px'
             }}>
               <StageGraphFlow
                 ref={stageFlowRef}
@@ -1445,26 +2119,148 @@ function App() {
             </div>
           }
           rightPanel={
-            <div style={{ flex: 1, minWidth: 0, overflowY: 'auto', paddingLeft: '10px' }}>
+            <div style={{ 
+              flex: 1, 
+              minWidth: 0, 
+              overflowY: 'auto', 
+              paddingLeft: '12px',
+              maxHeight: 'calc(100vh - 100px)'
+            }}>
           {/* Error Message */}
           {error && (
-            <div style={{
-              padding: '12px',
-              background: themeConfig.colors.error + '20',
-              border: `1px solid ${themeConfig.colors.error}`,
-              borderRadius: '8px',
-              color: themeConfig.colors.error,
-              marginBottom: '20px'
-            }}>
-              <strong>Error:</strong> {error}
-            </div>
+            <ErrorMessage message={error} onClose={() => setError(null)} />
           )}
 
-          {/* File Upload Section - Always visible */}
-          <div style={{ marginBottom: '20px' }}>
+          {/* Status Display with Tables and Stages as sub-fields */}
+          <div style={{
+            padding: '12px 16px',
+            background: themeConfig.colors.surfaceElevated,
+            borderRadius: '8px',
+            border: `1px solid ${themeConfig.colors.border}`,
+            boxShadow: themeConfig.shadows.sm,
+            marginBottom: '16px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '16px',
+            flexWrap: 'wrap'
+          }}>
+            {/* Status - More prominent */}
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+              flexShrink: 0,
+              flex: '1 1 auto',
+              minWidth: '200px'
+            }}>
+              {status.toLowerCase().includes('error') || status.toLowerCase().includes('fail') ? (
+                <AlertCircle size={16} style={{ color: themeConfig.colors.error, flexShrink: 0 }} />
+              ) : status.toLowerCase().includes('process') || status.toLowerCase().includes('analyzing') || status.toLowerCase().includes('thinking') || status.toLowerCase().includes('loading') || status.toLowerCase().includes('initializing') ? (
+                <Loader2 size={16} style={{ animation: 'spin 1s linear infinite', color: themeConfig.colors.primary, flexShrink: 0 }} />
+              ) : status.toLowerCase().includes('success') || status.toLowerCase().includes('ready') || status.toLowerCase().includes('complete') ? (
+                <CheckCircle2 size={16} style={{ color: themeConfig.colors.success, flexShrink: 0 }} />
+              ) : (
+                <Info size={16} style={{ color: themeConfig.colors.primary, flexShrink: 0 }} />
+              )}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{
+                  fontSize: '11px',
+                  fontWeight: '600',
+                  color: themeConfig.colors.textSecondary,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.5px',
+                  marginBottom: '2px',
+                  lineHeight: '1.4'
+                }}>
+                  Status
+                </div>
+                <div style={{
+                  fontSize: '14px',
+                  fontWeight: '500',
+                  color: themeConfig.colors.text,
+                  lineHeight: '1.5'
+                }}>
+                  {status}
+                </div>
+              </div>
+            </div>
+      
+            {/* Tables - Badge style */}
+            {tables.length > 0 && (
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                paddingLeft: '16px',
+                borderLeft: `1px solid ${themeConfig.colors.border}`,
+                flexShrink: 0
+              }}>
+                <Table2 size={16} style={{ color: themeConfig.colors.primary, flexShrink: 0 }} />
+                <div>
+                  <div style={{
+                    fontSize: '11px',
+                    fontWeight: '600',
+                    color: themeConfig.colors.textSecondary,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.5px',
+                    marginBottom: '2px',
+                    lineHeight: '1.4'
+                  }}>
+                    Tables
+                  </div>
+                  <div style={{
+                    fontSize: '14px',
+                    fontWeight: '500',
+                    color: themeConfig.colors.text,
+                    lineHeight: '1.5'
+                  }}>
+                    {tables.length} {tables.length === 1 ? 'Table' : 'Tables'}
+                  </div>
+                </div>
+              </div>
+            )}
+            
+            {/* Stages - Badge style */}
+            {transformationStages.length > 0 && (
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                paddingLeft: '16px',
+                borderLeft: `1px solid ${themeConfig.colors.border}`,
+                flexShrink: 0
+              }}>
+                <SettingsIcon size={16} style={{ color: themeConfig.colors.primary, flexShrink: 0 }} />
+                <div>
+                  <div style={{
+                    fontSize: '11px',
+                    fontWeight: '600',
+                    color: themeConfig.colors.textSecondary,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.5px',
+                    marginBottom: '2px',
+                    lineHeight: '1.4'
+                  }}>
+                    Stages
+                  </div>
+                  <div style={{
+                    fontSize: '14px',
+                    fontWeight: '500',
+                    color: themeConfig.colors.text,
+                    lineHeight: '1.5'
+                  }}>
+                    {transformationStages.length} {transformationStages.length === 1 ? 'Stage' : 'Stages'}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* File Upload Section - Consolidated */}
+          <div style={{ marginBottom: '16px' }}>
             <div {...getRootProps()} style={{ 
-              border: `2px dashed ${themeConfig.colors.border}`, 
-              padding: '30px', 
+              border: `1px dashed ${themeConfig.colors.border}`, 
+              padding: '24px', 
               textAlign: 'center', 
               cursor: 'pointer', 
               borderRadius: '8px', 
@@ -1472,7 +2268,8 @@ function App() {
               zIndex: 1,
               background: tables.length > 0 ? themeConfig.colors.surface : themeConfig.colors.surfaceElevated,
               transition: 'all 0.2s',
-              borderColor: themeConfig.colors.border
+              borderColor: themeConfig.colors.border,
+              outline: 'none'
             }}
             onMouseEnter={(e) => {
               e.currentTarget.style.borderColor = themeConfig.colors.primary;
@@ -1482,18 +2279,28 @@ function App() {
               e.currentTarget.style.borderColor = themeConfig.colors.border;
               e.currentTarget.style.background = tables.length > 0 ? themeConfig.colors.surface : themeConfig.colors.surfaceElevated;
             }}
+            onFocus={(e) => {
+              e.currentTarget.style.borderColor = themeConfig.colors.primary;
+              e.currentTarget.style.outline = `2px solid ${themeConfig.colors.primary}`;
+              e.currentTarget.style.outlineOffset = '2px';
+            }}
+            onBlur={(e) => {
+              e.currentTarget.style.borderColor = themeConfig.colors.border;
+              e.currentTarget.style.outline = 'none';
+            }}
+            tabIndex={0}
             >
           <input {...getInputProps()} />
-              <p style={{ margin: 0, fontSize: '16px', fontWeight: '500', color: themeConfig.colors.text }}>
+              <p style={{ margin: 0, fontSize: '14px', fontWeight: '500', color: themeConfig.colors.text, lineHeight: '1.5' }}>
                 {tables.length > 0 ? 'Upload More CSV Files' : 'Drag & drop your CSV file(s) here to begin'}
               </p>
-              <p style={{ fontSize: '14px', color: themeConfig.colors.textSecondary, marginTop: '8px', marginBottom: 0 }}>
+              <p style={{ fontSize: '12px', color: themeConfig.colors.textSecondary, marginTop: '8px', marginBottom: 0, lineHeight: '1.5' }}>
                 {tables.length > 0 
                   ? 'Add additional tables for joins, unions, or other operations' 
                   : 'You can upload multiple CSV files. Each will be loaded as a separate table.'}
               </p>
               {tables.length > 0 && (
-                <p style={{ fontSize: '12px', color: themeConfig.colors.textTertiary, marginTop: '4px', marginBottom: 0 }}>
+                <p style={{ fontSize: '11px', color: themeConfig.colors.textTertiary, marginTop: '4px', marginBottom: 0, lineHeight: '1.4' }}>
                   Currently loaded: {tables.length} table(s)
                 </p>
               )}
@@ -1502,9 +2309,9 @@ function App() {
 
           {/* Homepage Content - Only show when no tables */}
           {tables.length === 0 && (
-            <div style={{ marginTop: '20px' }}>
+            <div style={{ marginTop: '16px' }}>
               {/* Chat Field on Homepage */}
-              <div style={{ marginBottom: '30px' }}>
+              <div style={{ marginBottom: '24px' }}>
                 <SmartTransform 
                   schema={mockSchema} 
                   onTransform={handleTransform} 
@@ -1514,11 +2321,12 @@ function App() {
                   onImageUpload={handleImageUpload}
                   explanation={imageExplanation}
                   status={status}
+                  hasExistingFlow={tables.length > 0 || transformationStages.length > 0}
                 />
               </div>
 
-              <h2 style={{ fontSize: '20px', marginBottom: '15px', color: themeConfig.colors.text }}>Try Visualization Presets (Sample Data)</h2>
-              <p style={{ fontSize: '14px', color: themeConfig.colors.textSecondary, marginBottom: '20px' }}>
+              <h2 style={{ fontSize: '18px', marginBottom: '12px', color: themeConfig.colors.text, fontWeight: '600', lineHeight: '1.5' }}>Try Visualization Presets (Sample Data)</h2>
+              <p style={{ fontSize: '14px', color: themeConfig.colors.textSecondary, marginBottom: '16px', lineHeight: '1.5' }}>
                 Explore different visualization types with our sample sales data. Upload your own CSV to use your data.
               </p>
             {showVisualizationPresets && (
@@ -1532,18 +2340,18 @@ function App() {
             {/* Show sample data table */}
             {chartConfig && (
               <>
-                <div style={{ color: themeConfig.colors.textSecondary, fontSize: '14px', marginTop: '20px', marginBottom: '10px' }}>
+                <div style={{ color: themeConfig.colors.textSecondary, fontSize: '14px', marginTop: '16px', marginBottom: '8px', lineHeight: '1.5' }}>
                   Status: <strong>Showing sample data visualization</strong>
                 </div>
                 {/* Show standard Recharts for basic chart types */}
                 {chartConfig && !chartConfig.type?.startsWith('d3-') && !chartConfig.type?.startsWith('3d-') && (
-                  <ErrorBoundary fallback={<div style={{ padding: '20px', background: themeConfig.colors.error + '20', borderRadius: '8px', color: themeConfig.colors.error }}>Error rendering chart. Please check your axis selections.</div>}>
+                  <ErrorBoundary fallback={<ErrorMessage message="Error rendering chart. Please check your axis selections." />}>
                     <DynamicChart data={mockData} config={chartConfig} />
                   </ErrorBoundary>
                 )}
                 {/* Show enhanced visualizations for D3.js and 3D charts */}
                 {chartConfig && (chartConfig.type?.startsWith('d3-') || chartConfig.type?.startsWith('3d-')) && (
-                  <ErrorBoundary fallback={<div style={{ padding: '20px', background: themeConfig.colors.error + '20', borderRadius: '8px', color: themeConfig.colors.error }}>Error rendering visualization. Please check your axis selections.</div>}>
+                  <ErrorBoundary fallback={<ErrorMessage message="Error rendering visualization. Please check your axis selections." />}>
                     <EnhancedVisualizations data={mockData} config={chartConfig} />
                   </ErrorBoundary>
                 )}
@@ -1564,6 +2372,7 @@ function App() {
             onImageUpload={handleImageUpload}
             explanation={imageExplanation}
             status={status}
+            hasExistingFlow={tables.length > 0 || transformationStages.length > 0}
           />
           
           {/* Visualization Presets */}
@@ -1574,21 +2383,17 @@ function App() {
               onVisualize={handlePresetVisualize}
             />
           )}
-          
-          <div style={{ color: themeConfig.colors.textSecondary, fontSize: '14px', marginBottom: '10px' }}>
-            Status: <strong>{status}</strong>
-          </div>
 
           {/* 3. Visuals */}
           {/* Show standard Recharts for basic chart types */}
           {chartConfig && !chartConfig.type?.startsWith('d3-') && !chartConfig.type?.startsWith('3d-') && (
-            <ErrorBoundary fallback={<div style={{ padding: '20px', background: themeConfig.colors.error + '20', borderRadius: '8px', color: themeConfig.colors.error }}>Error rendering chart. Please check your axis selections.</div>}>
+            <ErrorBoundary fallback={<ErrorMessage message="Error rendering chart. Please check your axis selections." />}>
           <DynamicChart data={rows} config={chartConfig} />
             </ErrorBoundary>
           )}
-          {/* Show enhanced visualizations for D3.js and 3D charts */}
+ {/* Show enhanced visualizations for D3.js and 3D charts */}
           {chartConfig && (chartConfig.type?.startsWith('d3-') || chartConfig.type?.startsWith('3d-')) && (
-            <ErrorBoundary fallback={<div style={{ padding: '20px', background: themeConfig.colors.error + '20', borderRadius: '8px', color: themeConfig.colors.error }}>Error rendering visualization. Please check your axis selections.</div>}>
+            <ErrorBoundary fallback={<ErrorMessage message="Error rendering visualization. Please check your axis selections." />}>
               <EnhancedVisualizations data={rows} config={chartConfig} />
             </ErrorBoundary>
           )}
@@ -1602,26 +2407,92 @@ function App() {
             onTableClose={handleTableClose}
           />
           
-          <div style={{ overflowX: 'auto', marginTop: '20px', border: `1px solid ${themeConfig.colors.border}`, borderRadius: '8px', overflow: 'hidden' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
-              <thead style={{ background: themeConfig.colors.surface }}>
+          {rows.length === 0 ? (
+            <EmptyState
+              icon={<Database size={48} style={{ color: themeConfig.colors.textSecondary }} />}
+              title="No data to display"
+              description="Upload a CSV file or create a transformation to see data here."
+            />
+          ) : (
+            <div style={{ 
+              overflowX: 'auto', 
+              marginTop: '16px', 
+              border: `1px solid ${themeConfig.colors.border}`, 
+              borderRadius: '8px', 
+              overflow: 'hidden',
+              background: themeConfig.colors.surfaceElevated,
+              maxHeight: '600px',
+              display: 'flex',
+              flexDirection: 'column'
+            }}>
+              <div style={{ 
+                overflowY: 'auto',
+                flex: 1
+              }}>
+                <table style={{ 
+                  width: '100%', 
+                  borderCollapse: 'collapse', 
+                  fontSize: '14px',
+                  tableLayout: 'auto'
+                }}>
+                  <thead style={{
+                    position: 'sticky',
+                    top: 0,
+                    zIndex: 10,
+                    background: themeConfig.colors.surface
+                  }}>
                 <tr>
                   {rows.length > 0 && Object.keys(rows[0]).map(key => (
-                    <th key={key} style={{ padding: '10px', textAlign: 'left', borderBottom: `2px solid ${themeConfig.colors.border}`, color: themeConfig.colors.text }}>{key}</th>
+                        <th key={key} style={{ 
+                          padding: '12px 16px', 
+                          textAlign: 'left', 
+                          borderBottom: `1px solid ${themeConfig.colors.border}`, 
+                          color: themeConfig.colors.text,
+                          fontWeight: '600',
+                          fontSize: '12px',
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.5px',
+                          background: themeConfig.colors.surface,
+                          whiteSpace: 'nowrap'
+                        }}>
+                          {key}
+                        </th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {rows.map((row, i) => (
-                  <tr key={i} style={{ borderBottom: `1px solid ${themeConfig.colors.borderLight}`, background: i % 2 === 0 ? themeConfig.colors.background : themeConfig.colors.surface }}>
-                    {Object.values(row).map((val: any, j) => (
-                      <td key={j} style={{ padding: '8px', color: themeConfig.colors.text }}>{val?.toString()}</td>
+                      <tr 
+                        key={i} 
+                        style={{ 
+                          borderBottom: `1px solid ${themeConfig.colors.borderLight}`, 
+                          background: i % 2 === 0 ? themeConfig.colors.background : themeConfig.colors.surface,
+                          transition: 'background 0.15s'
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.background = themeConfig.colors.surfaceElevated;
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.background = i % 2 === 0 ? themeConfig.colors.background : themeConfig.colors.surface;
+                        }}
+                      >
+                        {Object.keys(rows[0]).map((key, j) => (
+                          <td key={j} style={{ 
+                            padding: '12px 16px', 
+                            color: themeConfig.colors.text,
+                            lineHeight: '1.5',
+                            whiteSpace: 'nowrap'
+                          }}>
+                            {row[key]?.toString()}
+                          </td>
                     ))}
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+            </div>
+          )}
         </>
       )}
             </div>
@@ -1639,6 +2510,18 @@ function App() {
         onReplace={handleReplaceFlow}
         onAddSideBySide={handleAddFlowSideBySide}
         existingStagesCount={transformationStages.length}
+      />
+
+      {/* Clear Flow Confirmation Dialog */}
+      <ConfirmDialog
+        isOpen={showClearFlowDialog}
+        onClose={() => setShowClearFlowDialog(false)}
+        onConfirm={confirmClearFlow}
+        title="Clear Flow"
+        message="Are you sure you want to clear all transformation stages? This will remove all stages from the flow."
+        confirmText="Clear Flow"
+        cancelText="Cancel"
+        confirmButtonStyle={{ background: '#ef4444' }}
       />
 
       {/* Export Preview Modal */}
@@ -1748,31 +2631,141 @@ function App() {
                   padding: '10px 20px',
                   background: themeConfig.colors.surface,
                   border: `1px solid ${themeConfig.colors.border}`,
-                  borderRadius: '6px',
+                  borderRadius: '8px',
                   cursor: 'pointer',
                   color: themeConfig.colors.text,
-                  fontSize: '14px'
+                  fontSize: '14px',
+                  fontWeight: '500',
+                  transition: 'all 0.2s',
+                  outline: 'none'
                 }}
+                onFocus={(e) => {
+                  e.currentTarget.style.outline = `2px solid ${themeConfig.colors.primary}`;
+                  e.currentTarget.style.outlineOffset = '2px';
+                }}
+                onBlur={(e) => {
+                  e.currentTarget.style.outline = 'none';
+                }}
+                tabIndex={0}
               >
                 Cancel
               </button>
+              {exportPreview.type === 'json' && (
+                <button
+                  onClick={async () => {
+                    if (exportPreview.data) {
+                      try {
+                        await navigator.clipboard.writeText(exportPreview.data);
+                        // Show toast notification
+                        setToastMessage('JSON copied to clipboard!');
+                        setTimeout(() => {
+                          setToastMessage(null);
+                        }, 3000);
+                      } catch (err) {
+                        console.error('Failed to copy:', err);
+                        setToastMessage('Failed to copy JSON');
+                        setTimeout(() => {
+                          setToastMessage(null);
+                        }, 3000);
+                      }
+                    }
+                  }}
+                  style={{
+                    padding: '10px 20px',
+                    background: themeConfig.colors.primary,
+                    border: 'none',
+                    borderRadius: '8px',
+                    cursor: 'pointer',
+                    color: 'white',
+                    fontSize: '14px',
+                    fontWeight: '500',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    transition: 'background 0.2s',
+                    outline: 'none'
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = themeConfig.colors.primaryDark;
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = themeConfig.colors.primary;
+                  }}
+                  onFocus={(e) => {
+                    e.currentTarget.style.outline = `2px solid ${themeConfig.colors.primary}`;
+                    e.currentTarget.style.outlineOffset = '2px';
+                  }}
+                  onBlur={(e) => {
+                    e.currentTarget.style.outline = 'none';
+                  }}
+                  tabIndex={0}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                  </svg>
+                  Copy
+                </button>
+              )}
               <button
                 onClick={exportPreview.type === 'json' ? downloadJSON : downloadImage}
                 style={{
                   padding: '10px 20px',
                   background: themeConfig.colors.primary,
                   border: 'none',
-                  borderRadius: '6px',
+                  borderRadius: '8px',
                   cursor: 'pointer',
                   color: 'white',
                   fontSize: '14px',
-                  fontWeight: '500'
+                  fontWeight: '500',
+                  transition: 'background 0.2s',
+                  outline: 'none'
                 }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = themeConfig.colors.primaryDark;
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = themeConfig.colors.primary;
+                }}
+                onFocus={(e) => {
+                  e.currentTarget.style.outline = `2px solid ${themeConfig.colors.primary}`;
+                  e.currentTarget.style.outlineOffset = '2px';
+                }}
+                onBlur={(e) => {
+                  e.currentTarget.style.outline = 'none';
+                }}
+                tabIndex={0}
               >
                 Download
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Toast Notification */}
+      {toastMessage && (
+        <div style={{
+          position: 'fixed',
+          bottom: '24px',
+          right: '24px',
+          background: themeConfig.colors.surfaceElevated,
+          color: themeConfig.colors.text,
+          padding: '12px 20px',
+          borderRadius: '8px',
+          boxShadow: themeConfig.shadows.lg,
+          border: `1px solid ${themeConfig.colors.border}`,
+          display: 'flex',
+          alignItems: 'center',
+          gap: '12px',
+          zIndex: 10001,
+          animation: 'slideInUp 0.3s ease-out',
+          maxWidth: '400px'
+        }}>
+          <CheckCircle2 size={20} style={{ color: themeConfig.colors.success, flexShrink: 0 }} />
+          <span style={{ fontSize: '14px', fontWeight: '500', lineHeight: '1.5' }}>
+            {toastMessage}
+          </span>
         </div>
       )}
     </div>
