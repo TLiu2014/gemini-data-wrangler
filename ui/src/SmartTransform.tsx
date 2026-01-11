@@ -1,7 +1,51 @@
-import React, { useState } from 'react';
-import { Send, Sparkles, Loader2, Upload, MessageSquare } from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import { Send, Sparkles, Loader2, Upload, MessageSquare, Mic, MicOff, Square } from 'lucide-react';
 import { useDropzone } from 'react-dropzone';
 import { useTheme } from './ThemeProvider';
+
+// TypeScript declarations for Web Speech API
+interface SpeechRecognition extends EventTarget {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start(): void;
+  stop(): void;
+  onresult: (event: SpeechRecognitionEvent) => void;
+  onerror: (event: SpeechRecognitionErrorEvent) => void;
+  onend: () => void;
+}
+
+interface SpeechRecognitionEvent {
+  results: SpeechRecognitionResultList;
+}
+
+interface SpeechRecognitionResultList {
+  [index: number]: SpeechRecognitionResult;
+  length: number;
+}
+
+interface SpeechRecognitionResult {
+  [index: number]: SpeechRecognitionAlternative;
+  length: number;
+  isFinal: boolean;
+}
+
+interface SpeechRecognitionAlternative {
+  transcript: string;
+  confidence: number;
+}
+
+interface SpeechRecognitionErrorEvent {
+  error: string;
+}
+
+declare var SpeechRecognition: {
+  new (): SpeechRecognition;
+};
+
+declare var webkitSpeechRecognition: {
+  new (): SpeechRecognition;
+};
 
 interface Props {
   schema: any[]; // The column definitions (available for future use)
@@ -15,11 +59,23 @@ interface Props {
   hasExistingFlow?: boolean; // Whether there are existing tables or stages
 }
 
-export function SmartTransform({ onTransform, isProcessing, externalPrompt, onPromptChange, onImageUpload, explanation, status, hasExistingFlow }: Props) {
+export function SmartTransform({ schema, onTransform, isProcessing, externalPrompt, onPromptChange, onImageUpload, explanation, status, hasExistingFlow }: Props) {
   const { themeConfig } = useTheme();
   const [prompt, setPrompt] = useState('');
-  const [activeTab, setActiveTab] = useState<'chat' | 'upload'>('chat');
+  const [activeTab, setActiveTab] = useState<'chat' | 'upload' | 'voice'>('chat');
   const [isImageProcessing, setIsImageProcessing] = useState(false);
+  
+  // Voice recording state
+  const [voiceMode, setVoiceMode] = useState<'command' | 'chat'>('command');
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [transcript, setTranscript] = useState('');
+  const [chatHistory, setChatHistory] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
+  const [isVoiceProcessing, setIsVoiceProcessing] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState<string>('');
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
   
   // Sync with external prompt changes
   React.useEffect(() => {
@@ -58,6 +114,308 @@ export function SmartTransform({ onTransform, isProcessing, externalPrompt, onPr
     onTransform(prompt); // Send prompt to parent
     setPrompt('');
   };
+
+  // Cleanup on unmount or tab change
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch (e) {
+          // Ignore errors when stopping
+        }
+      }
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
+      }
+    };
+  }, [activeTab, voiceMode]);
+
+  // Start/stop voice recording - Always use MediaRecorder to capture raw audio for Gemini
+  const startRecording = async () => {
+    try {
+      setVoiceStatus('Starting recording...');
+      setTranscript('');
+      const recordingStartTime = Date.now();
+      
+      // Always use MediaRecorder to capture raw audio for better accuracy with Gemini
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 44100
+        } 
+      });
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: 'audio/webm;codecs=opus'
+      });
+      audioChunksRef.current = [];
+      
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+      
+      mediaRecorder.onstop = async () => {
+        const recordingDuration = Date.now() - recordingStartTime;
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm;codecs=opus' });
+        
+        // Validate minimum recording duration (at least 0.5 seconds)
+        if (recordingDuration < 500) {
+          setVoiceStatus('⚠️ Recording too short. Please speak for at least half a second.');
+          setChatHistory(prev => [...prev, { 
+            role: 'assistant', 
+            content: 'The recording was too short. Please record a longer voice message with clear instructions about data transformation.'
+          }]);
+          stream.getTracks().forEach(track => track.stop());
+          setTimeout(() => setVoiceStatus(''), 3000);
+          return;
+        }
+        
+        // Validate minimum audio size (at least 1KB to ensure there's actual audio data)
+        if (audioBlob.size < 1024) {
+          setVoiceStatus('⚠️ No audio detected. Please check your microphone.');
+          setChatHistory(prev => [...prev, { 
+            role: 'assistant', 
+            content: 'No audio was detected in the recording. Please check your microphone and try again.'
+          }]);
+          stream.getTracks().forEach(track => track.stop());
+          setTimeout(() => setVoiceStatus(''), 3000);
+          return;
+        }
+        
+        setVoiceStatus('Recording stopped. Preparing audio...');
+        await handleAudioBlob(audioBlob);
+        stream.getTracks().forEach(track => track.stop());
+      };
+      
+      mediaRecorder.start();
+      mediaRecorderRef.current = mediaRecorder;
+      setIsRecording(true);
+      setVoiceStatus('🔴 Recording... Click the button to stop');
+    } catch (error) {
+      console.error('Error starting recording:', error);
+      setIsRecording(false);
+      setVoiceStatus('');
+      setChatHistory(prev => [...prev, { 
+        role: 'assistant', 
+        content: `Error: ${error instanceof Error ? error.message : 'Failed to start recording. Please check microphone permissions.'}` 
+      }]);
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    setIsRecording(false);
+    setVoiceStatus('Processing...');
+  };
+
+  // Handle audio blob - Send directly to Gemini for processing
+  const handleAudioBlob = async (audioBlob: Blob) => {
+    setIsVoiceProcessing(true);
+    try {
+      setVoiceStatus('📤 Sending audio to Gemini...');
+      const formData = new FormData();
+      formData.append('audio', audioBlob, 'recording.webm');
+      const apiKey = sessionStorage.getItem('gemini_api_key');
+      if (apiKey) {
+        formData.append('apiKey', apiKey);
+      }
+      
+      if (voiceMode === 'command') {
+        // Command mode: Send audio directly to Gemini for transformation
+        formData.append('schema', JSON.stringify(schema));
+        formData.append('allSchemas', JSON.stringify(schema)); // For now, use same schema
+        
+        setVoiceStatus('🤖 Gemini is processing your voice command...');
+        const response = await fetch('/api/voice/command', {
+          method: 'POST',
+          body: formData
+        });
+        
+        if (!response.ok) {
+          // Try to parse as JSON, but handle HTML error pages
+          let errorMessage = `Server error (${response.status})`;
+          try {
+            const contentType = response.headers.get('content-type');
+            if (contentType && contentType.includes('application/json')) {
+              const errorData = await response.json();
+              errorMessage = errorData.error || errorData.details || errorMessage;
+            } else {
+              // Server returned HTML (error page)
+              const text = await response.text();
+              errorMessage = `Server returned HTML instead of JSON. Status: ${response.status}. This usually means the server endpoint doesn't exist or the server isn't running.`;
+              console.error('Server response (HTML):', text.substring(0, 200));
+            }
+          } catch (e) {
+            errorMessage = `Failed to parse error response: ${e instanceof Error ? e.message : 'Unknown error'}`;
+          }
+          throw new Error(errorMessage);
+        }
+        
+        setVoiceStatus('✅ Gemini understood your command. Executing transformation...');
+        
+        // Parse response with error handling
+        let result;
+        try {
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const text = await response.text();
+                throw new Error(`Server returned non-JSON response: ${text.substring(0, 100)}`);
+            }
+            result = await response.json();
+        } catch (parseError) {
+            throw new Error(`Failed to parse server response: ${parseError instanceof Error ? parseError.message : 'Unknown error'}`);
+        }
+        
+        const transcript = result.transcript || result.explanation || 'Voice command processed';
+        setTranscript(transcript);
+        
+        // Check if the audio is valid (not empty, not music, not unrelated)
+        if (result.isValid === false) {
+          // Audio is empty or unrelated - show message but don't transform
+          const errorMessage = result.explanation || 'The audio does not appear to be a data transformation command. Please provide a clear voice instruction about how you want to transform your data.';
+          setVoiceStatus(`⚠️ ${errorMessage}`);
+          setChatHistory([{ 
+            role: 'assistant', 
+            content: errorMessage
+          }]);
+          setTranscript(transcript);
+          setTimeout(() => setVoiceStatus(''), 5000);
+          return; // Don't execute transformation - keep current flow and tables unchanged
+        }
+        
+        // Ensure we have valid transformation data before proceeding
+        if (!result.sql || !result.transformationStages || result.transformationStages.length === 0) {
+          setVoiceStatus('⚠️ Could not generate transformation from voice command.');
+          setChatHistory([{ 
+            role: 'assistant', 
+            content: 'The voice command was recognized but could not be converted to a data transformation. Please try rephrasing your request more clearly.'
+          }]);
+          setTranscript(transcript);
+          setTimeout(() => setVoiceStatus(''), 5000);
+          return; // Don't execute transformation
+        }
+        
+        // The response from /api/voice/command includes the full transformation response
+        // We need to extract the user's intent and send it to onTransform
+        // For now, use the explanation as the prompt since it contains what Gemini understood
+        if (transcript && transcript !== 'Voice command processed') {
+          // Use the explanation which contains Gemini's understanding of the command
+          await onTransform(transcript);
+        } else if (result.explanation) {
+          // Fallback to explanation
+          await onTransform(result.explanation);
+        }
+        setChatHistory([]);
+        setVoiceStatus('✅ Done!');
+        setTimeout(() => setVoiceStatus(''), 2000);
+      } else {
+        // Chat mode: Send audio to Gemini for conversation
+        formData.append('history', JSON.stringify(chatHistory));
+        formData.append('schema', JSON.stringify(schema));
+        
+        setVoiceStatus('🤖 Gemini is processing your voice message...');
+        const response = await fetch('/api/voice/chat-audio', {
+          method: 'POST',
+          body: formData
+        });
+        
+        if (!response.ok) {
+          // Try to parse as JSON, but handle HTML error pages
+          let errorMessage = `Server error (${response.status})`;
+          try {
+            const contentType = response.headers.get('content-type');
+            if (contentType && contentType.includes('application/json')) {
+              const errorData = await response.json();
+              errorMessage = errorData.error || errorData.details || errorMessage;
+            } else {
+              // Server returned HTML (error page)
+              const text = await response.text();
+              errorMessage = `Server returned HTML instead of JSON. Status: ${response.status}. This usually means the server endpoint doesn't exist or the server isn't running.`;
+              console.error('Server response (HTML):', text.substring(0, 200));
+            }
+          } catch (e) {
+            errorMessage = `Failed to parse error response: ${e instanceof Error ? e.message : 'Unknown error'}`;
+          }
+          throw new Error(errorMessage);
+        }
+        
+        // Parse response with error handling
+        let responseData;
+        try {
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const text = await response.text();
+                throw new Error(`Server returned non-JSON response: ${text.substring(0, 100)}`);
+            }
+            responseData = await response.json();
+        } catch (parseError) {
+            throw new Error(`Failed to parse server response: ${parseError instanceof Error ? parseError.message : 'Unknown error'}`);
+        }
+        
+        const { transcript: userTranscript, response: assistantResponse, shouldTransform } = responseData;
+        
+        // Check if transcript indicates empty or unrelated audio
+        const isEmptyOrUnrelated = userTranscript && (
+          userTranscript.includes('[No speech detected]') ||
+          userTranscript.toLowerCase().includes('not related') ||
+          userTranscript.toLowerCase().includes('music') ||
+          assistantResponse?.toLowerCase().includes('not related to data transformation') ||
+          assistantResponse?.toLowerCase().includes('no speech was detected') ||
+          (assistantResponse?.toLowerCase().includes('appears to be') && assistantResponse?.toLowerCase().includes('not a message'))
+        );
+        
+        setTranscript(userTranscript || 'Voice message processed');
+        
+        if (isEmptyOrUnrelated) {
+          // Audio is empty or unrelated - show message but don't transform
+          const errorMessage = assistantResponse || 'The audio does not appear to be a valid message about data transformation. Please try again.';
+          setVoiceStatus(`⚠️ ${errorMessage}`);
+          const newHistory = [
+            ...chatHistory, 
+            { role: 'user' as const, content: userTranscript || 'Voice message' },
+            { role: 'assistant' as const, content: errorMessage }
+          ];
+          setChatHistory(newHistory);
+          setTimeout(() => setVoiceStatus(''), 5000);
+          return; // Don't execute transformation - keep current flow and tables unchanged
+        }
+        
+        const newHistory = [
+          ...chatHistory, 
+          { role: 'user' as const, content: userTranscript || 'Voice message' },
+          { role: 'assistant' as const, content: assistantResponse }
+        ];
+        setChatHistory(newHistory);
+        
+        setVoiceStatus('✅ Response received');
+        setTimeout(() => setVoiceStatus(''), 2000);
+        
+        // If Gemini suggests a transformation, execute it (only if valid transcript)
+        if (shouldTransform && userTranscript && userTranscript !== '[No speech detected]') {
+          await onTransform(userTranscript);
+        }
+      }
+    } catch (error) {
+      console.error('Error processing audio:', error);
+      setVoiceStatus(`❌ Error: ${error instanceof Error ? error.message : 'Failed to process audio'}`);
+      setChatHistory(prev => [...prev, { 
+        role: 'assistant', 
+        content: `Error: ${error instanceof Error ? error.message : 'Failed to process audio'}` 
+      }]);
+      setTimeout(() => setVoiceStatus(''), 5000);
+    } finally {
+      setIsVoiceProcessing(false);
+    }
+  };
+
+  // This function is no longer needed since we send audio directly to Gemini
+  // Keeping for potential future use
 
   return (
     <div style={{ 
@@ -142,6 +500,35 @@ export function SmartTransform({ onTransform, isProcessing, externalPrompt, onPr
           >
             <Upload size={16} />
             Upload Image
+          </button>
+          <button
+            onClick={() => setActiveTab('voice')}
+            style={{
+              padding: '10px 16px',
+              background: 'transparent',
+              border: 'none',
+              borderBottom: activeTab === 'voice' ? `2px solid ${themeConfig.colors.primary}` : '2px solid transparent',
+              color: activeTab === 'voice' ? themeConfig.colors.primary : themeConfig.colors.textSecondary,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              fontSize: '14px',
+              fontWeight: activeTab === 'voice' ? '600' : '400',
+              transition: 'all 0.2s',
+              outline: 'none'
+            }}
+            onFocus={(e) => {
+              e.currentTarget.style.outline = `2px solid ${themeConfig.colors.primary}`;
+              e.currentTarget.style.outlineOffset = '2px';
+            }}
+            onBlur={(e) => {
+              e.currentTarget.style.outline = 'none';
+            }}
+            tabIndex={0}
+          >
+            <Mic size={16} />
+            Voice
           </button>
         </div>
 
@@ -252,6 +639,269 @@ export function SmartTransform({ onTransform, isProcessing, externalPrompt, onPr
           </button>
         ))}
       </div>
+          </div>
+        )}
+
+        {activeTab === 'voice' && (
+          <div style={{ marginTop: '16px' }}>
+            {/* Mode Selection */}
+            <div style={{ marginBottom: '16px', display: 'flex', gap: '8px' }}>
+              <button
+                onClick={() => {
+                  setVoiceMode('command');
+                  setChatHistory([]);
+                }}
+                style={{
+                  flex: 1,
+                  padding: '10px 16px',
+                  background: voiceMode === 'command' ? themeConfig.colors.primary : themeConfig.colors.surface,
+                  color: voiceMode === 'command' ? 'white' : themeConfig.colors.text,
+                  border: `1px solid ${voiceMode === 'command' ? themeConfig.colors.primary : themeConfig.colors.border}`,
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                  fontWeight: voiceMode === 'command' ? '600' : '400',
+                  transition: 'all 0.2s',
+                  outline: 'none'
+                }}
+                onFocus={(e) => {
+                  e.currentTarget.style.outline = `2px solid ${themeConfig.colors.primary}`;
+                  e.currentTarget.style.outlineOffset = '2px';
+                }}
+                onBlur={(e) => {
+                  e.currentTarget.style.outline = 'none';
+                }}
+                tabIndex={0}
+              >
+                Command
+              </button>
+              <button
+                onClick={() => setVoiceMode('chat')}
+                style={{
+                  flex: 1,
+                  padding: '10px 16px',
+                  background: voiceMode === 'chat' ? themeConfig.colors.primary : themeConfig.colors.surface,
+                  color: voiceMode === 'chat' ? 'white' : themeConfig.colors.text,
+                  border: `1px solid ${voiceMode === 'chat' ? themeConfig.colors.primary : themeConfig.colors.border}`,
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                  fontWeight: voiceMode === 'chat' ? '600' : '400',
+                  transition: 'all 0.2s',
+                  outline: 'none'
+                }}
+                onFocus={(e) => {
+                  e.currentTarget.style.outline = `2px solid ${themeConfig.colors.primary}`;
+                  e.currentTarget.style.outlineOffset = '2px';
+                }}
+                onBlur={(e) => {
+                  e.currentTarget.style.outline = 'none';
+                }}
+                tabIndex={0}
+              >
+                Chat
+              </button>
+            </div>
+
+            {/* Mode Description */}
+            <div style={{
+              padding: '12px',
+              background: themeConfig.colors.surface,
+              borderRadius: '8px',
+              marginBottom: '16px',
+              fontSize: '12px',
+              color: themeConfig.colors.textSecondary,
+              lineHeight: '1.5'
+            }}>
+              {voiceMode === 'command' ? (
+                <>💡 <strong>Command mode:</strong> Send one voice message. Gemini will fill in ambiguous parts and execute the transformation.</>
+              ) : (
+                <>💬 <strong>Chat mode:</strong> Have a conversation with Gemini. It can ask clarifying questions before transforming your data.</>
+              )}
+            </div>
+
+            {/* Voice Recording Interface */}
+            <div style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '12px',
+              alignItems: 'center'
+            }}>
+              {/* Record Button */}
+              <button
+                onClick={isRecording ? stopRecording : startRecording}
+                disabled={isProcessing || isVoiceProcessing || isTranscribing}
+                style={{
+                  width: '80px',
+                  height: '80px',
+                  borderRadius: '50%',
+                  background: isRecording 
+                    ? themeConfig.colors.error 
+                    : (isProcessing || isVoiceProcessing || isTranscribing)
+                    ? themeConfig.colors.secondary
+                    : themeConfig.colors.primary,
+                  color: 'white',
+                  border: 'none',
+                  cursor: (isProcessing || isVoiceProcessing || isTranscribing) ? 'not-allowed' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  transition: 'all 0.2s',
+                  outline: 'none',
+                  boxShadow: isRecording ? `0 0 20px ${themeConfig.colors.error}40` : themeConfig.shadows.md
+                }}
+                onFocus={(e) => {
+                  if (!isProcessing && !isVoiceProcessing && !isTranscribing) {
+                    e.currentTarget.style.outline = `2px solid ${themeConfig.colors.primary}`;
+                    e.currentTarget.style.outlineOffset = '2px';
+                  }
+                }}
+                onBlur={(e) => {
+                  e.currentTarget.style.outline = 'none';
+                }}
+                tabIndex={0}
+              >
+                {isRecording ? (
+                  <Square size={32} />
+                ) : (
+                  <Mic size={32} />
+                )}
+              </button>
+
+              {/* Status Box - Prominent feedback */}
+              {(voiceStatus || isRecording || isVoiceProcessing) && (
+                <div style={{
+                  width: '100%',
+                  padding: '16px',
+                  background: themeConfig.colors.surfaceElevated,
+                  borderRadius: '8px',
+                  border: `1px solid ${themeConfig.colors.border}`,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '12px',
+                  alignItems: 'center'
+                }}>
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '12px',
+                    width: '100%'
+                  }}>
+                    {(isRecording || isVoiceProcessing) && (
+                      <Loader2 size={20} style={{ animation: 'spin 1s linear infinite', color: themeConfig.colors.primary, flexShrink: 0 }} />
+                    )}
+                    <div style={{ flex: 1 }}>
+                      <div style={{
+                        fontSize: '14px',
+                        color: themeConfig.colors.text,
+                        fontWeight: '600',
+                        marginBottom: '4px',
+                        lineHeight: '1.5'
+                      }}>
+                        {voiceStatus || (isRecording ? '🔴 Recording...' : isVoiceProcessing ? 'Processing...' : '')}
+                      </div>
+                      {isRecording && (
+                        <div style={{
+                          fontSize: '12px',
+                          color: themeConfig.colors.textSecondary,
+                          lineHeight: '1.5'
+                        }}>
+                          Click the button above to stop recording
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {/* Progress bar */}
+                  {(isRecording || isVoiceProcessing) && (
+                    <div style={{
+                      width: '100%',
+                      height: '4px',
+                      background: themeConfig.colors.border,
+                      borderRadius: '2px',
+                      overflow: 'hidden',
+                      position: 'relative'
+                    }}>
+                      <div style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: '-100%',
+                        height: '100%',
+                        width: '100%',
+                        background: `linear-gradient(90deg, transparent, ${themeConfig.colors.primary}, transparent)`,
+                        borderRadius: '2px',
+                        animation: 'progress 1.5s ease-in-out infinite'
+                      }} />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Status Text - Simple when no active operation */}
+              {!voiceStatus && !isRecording && !isVoiceProcessing && (
+                <div style={{
+                  fontSize: '14px',
+                  color: themeConfig.colors.textSecondary,
+                  fontWeight: '400',
+                  textAlign: 'center',
+                  minHeight: '20px'
+                }}>
+                  Click the microphone to start recording
+                </div>
+              )}
+
+              {/* Transcript Display */}
+              {transcript && (
+                <div style={{
+                  width: '100%',
+                  padding: '12px',
+                  background: themeConfig.colors.surface,
+                  borderRadius: '8px',
+                  border: `1px solid ${themeConfig.colors.border}`,
+                  fontSize: '14px',
+                  color: themeConfig.colors.text,
+                  lineHeight: '1.5',
+                  minHeight: '40px'
+                }}>
+                  <strong>You said:</strong> {transcript}
+                </div>
+              )}
+
+              {/* Chat History (for chat mode) */}
+              {voiceMode === 'chat' && chatHistory.length > 0 && (
+                <div style={{
+                  width: '100%',
+                  maxHeight: '300px',
+                  overflowY: 'auto',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '8px',
+                  padding: '12px',
+                  background: themeConfig.colors.surface,
+                  borderRadius: '8px',
+                  border: `1px solid ${themeConfig.colors.border}`
+                }}>
+                  {chatHistory.map((msg, idx) => (
+                    <div
+                      key={idx}
+                      style={{
+                        padding: '10px',
+                        background: msg.role === 'user' 
+                          ? themeConfig.colors.primary + '20' 
+                          : themeConfig.colors.surfaceElevated,
+                        borderRadius: '8px',
+                        fontSize: '13px',
+                        color: themeConfig.colors.text,
+                        lineHeight: '1.5',
+                        alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
+                        maxWidth: '80%'
+                      }}
+                    >
+                      <strong>{msg.role === 'user' ? 'You' : 'Gemini'}:</strong> {msg.content}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         )}
 

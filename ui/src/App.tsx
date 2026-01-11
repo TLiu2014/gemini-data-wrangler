@@ -67,6 +67,7 @@ function App() {
   const [conn, setConn] = useState<duckdb.AsyncDuckDBConnection | null>(null);
   const [tables, setTables] = useState<TableData[]>([]);
   const [activeTableId, setActiveTableId] = useState<string | null>(null);
+  const [closedTableIds, setClosedTableIds] = useState<Set<string>>(new Set()); // Track closed table tabs
   const [transformationStages, setTransformationStages] = useState<TransformationStage[]>([]);
   const [chartConfig, setChartConfig] = useState<any>(null); // From Gemini
   const [status, setStatus] = useState('Initializing Engine...');
@@ -174,7 +175,7 @@ function App() {
         loadedTables.push({ name: tableName, id: tableId });
         
         // Set as active if it's the first table
-        setActiveTableId(prev => prev || tableId);
+        if (!activeTableId) showTable(tableId);
         
         // Add LOAD stage
         const loadStage: TransformationStage = {
@@ -252,7 +253,7 @@ function App() {
               newMap.set(sampleStage.id, resultTableId);
               return newMap;
             });
-            setActiveTableId(resultTableId);
+            showTable(resultTableId);
           } catch (err) {
             console.warn(`Error executing sample stage:`, err);
           }
@@ -477,7 +478,7 @@ function App() {
         setTables(prev => [...prev, newTable]);
         
         // Set as active if it's the first table
-        setActiveTableId(prev => prev || tableId);
+        if (!activeTableId) showTable(tableId);
     
         // Add LOAD stage
         const loadStage: TransformationStage = {
@@ -505,19 +506,36 @@ function App() {
   };
 
   const handleTableSelect = (tableId: string) => {
+    // Remove from closed tables if it was closed
+    setClosedTableIds(prev => {
+      const newSet = new Set(prev);
+      newSet.delete(tableId);
+      return newSet;
+    });
+    setActiveTableId(tableId);
+  };
+
+  // Helper to set active table and ensure it's not in closed set
+  const showTable = (tableId: string) => {
+    setClosedTableIds(prev => {
+      const newSet = new Set(prev);
+      newSet.delete(tableId);
+      return newSet;
+    });
     setActiveTableId(tableId);
   };
 
   const handleTableClose = (tableId: string) => {
-    setTables(prev => {
-      const newTables = prev.filter(t => t.id !== tableId);
-      if (activeTableId === tableId && newTables.length > 0) {
-        setActiveTableId(newTables[0].id);
-      } else if (newTables.length === 0) {
-        setActiveTableId(null);
-      }
-      return newTables;
-    });
+    // Add to closed tables set instead of deleting
+    setClosedTableIds(prev => new Set(prev).add(tableId));
+    
+    // Find next table to show
+    const visibleTables = tables.filter(t => !closedTableIds.has(t.id) && t.id !== tableId);
+    if (activeTableId === tableId && visibleTables.length > 0) {
+      setActiveTableId(visibleTables[0].id);
+    } else if (visibleTables.length === 0) {
+      setActiveTableId(null);
+    }
   };
 
   const executeStageTransformation = async (stage: TransformationStage) => {
@@ -598,7 +616,7 @@ function App() {
               }
             : t
         ));
-        setActiveTableId(existingTableId);
+        showTable(existingTableId);
       } else {
         // Create new table for result
         const resultTableId = `table_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -618,7 +636,7 @@ function App() {
           newMap.set(stage.id, resultTableId);
           return newMap;
         });
-        setActiveTableId(resultTableId);
+        showTable(resultTableId);
       }
       setStatus(`Done! Created result table with ${resultRows.length} rows.`);
       setError(null);
@@ -1124,6 +1142,68 @@ function App() {
             }
           }
         }
+        
+        // Validation and inference for GROUP stages
+        if (stage.type === 'GROUP' && stage.data) {
+          // Check if groupBy is missing or empty
+          if (!stage.data.groupBy || stage.data.groupBy.length === 0) {
+            console.log(`⚠️ GROUP stage missing groupBy columns, attempting to infer...`);
+            const desc = stage.description.toLowerCase();
+            
+            // Try to infer groupBy columns from description
+            const inferredColumns: string[] = [];
+            
+            // Common patterns for grouping
+            if (desc.includes('customer') || desc.includes('by customer')) {
+              if (desc.includes('customer_id') || desc.includes('customer id')) {
+                inferredColumns.push('customer_id');
+              } else if (desc.includes('customer_name') || desc.includes('customer name')) {
+                inferredColumns.push('customer_name');
+              } else {
+                inferredColumns.push('customer_id'); // Default fallback
+              }
+            } else if (desc.includes('category') || desc.includes('by category')) {
+              inferredColumns.push('category');
+            } else if (desc.includes('status') || desc.includes('by status')) {
+              inferredColumns.push('status');
+            } else if (desc.includes('date') || desc.includes('by date')) {
+              inferredColumns.push('order_date');
+            } else if (desc.includes('product') || desc.includes('by product')) {
+              inferredColumns.push('product_id');
+            } else if (desc.includes('region') || desc.includes('by region')) {
+              inferredColumns.push('region');
+            }
+            
+            if (inferredColumns.length > 0) {
+              console.log(`  Inferred groupBy columns: ${inferredColumns.join(', ')}`);
+              stage.data.groupBy = inferredColumns;
+              
+              // Add default aggregation if not specified
+              if (!stage.data.aggregations || stage.data.aggregations.length === 0) {
+                stage.data.aggregations = [
+                  { function: 'COUNT', column: '*', alias: 'count' }
+                ];
+                console.log(`  Added default aggregation: COUNT(*) AS count`);
+              }
+            } else {
+              // Can't infer - log error and skip this stage
+              console.error(`❌ Cannot infer groupBy columns for GROUP stage: ${stage.description}`);
+              console.log(`  Skipping this stage due to missing groupBy data`);
+              continue; // Skip to next stage
+            }
+          }
+          
+          // Ensure aggregations are present
+          if (!stage.data.aggregations || stage.data.aggregations.length === 0) {
+            console.log(`⚠️ GROUP stage missing aggregations, adding default COUNT`);
+            stage.data.aggregations = [
+              { function: 'COUNT', column: '*', alias: 'count' }
+            ];
+          }
+          
+          // Validate groupBy columns exist in the input table (will check later when we have inputTableName)
+          // This will be validated after we determine the input table
+        }
 
         try {
           // Helper function to clean table names - remove _csv suffix and other file extensions
@@ -1300,6 +1380,61 @@ function App() {
             }
           }
           
+          // Validate GROUP stage columns exist in the input table
+          if (stage.type === 'GROUP' && stage.data?.groupBy && stage.data.groupBy.length > 0) {
+            try {
+              const schemaRes = await conn.query(`DESCRIBE ${inputTableName}`);
+              const tableSchema = schemaRes.toArray().map(r => r.toJSON());
+              const availableColumns = tableSchema.map((col: any) => 
+                (col.column_name || col.name || '').toLowerCase()
+              );
+              
+              console.log(`  Validating GROUP BY columns in ${inputTableName}:`, stage.data.groupBy);
+              console.log(`  Available columns:`, availableColumns.join(', '));
+              
+              // Check each groupBy column
+              const validGroupByColumns: string[] = [];
+              for (const col of stage.data.groupBy) {
+                const colLower = col.toLowerCase();
+                if (availableColumns.includes(colLower)) {
+                  validGroupByColumns.push(col);
+                  console.log(`  ✓ Column '${col}' found`);
+                } else {
+                  console.log(`  ✗ Column '${col}' not found`);
+                  // Try to find similar column
+                  const similarCol = availableColumns.find(c => 
+                    c.includes(colLower) || colLower.includes(c) || 
+                    c.replace(/_/g, '').includes(colLower.replace(/_/g, ''))
+                  );
+                  if (similarCol) {
+                    // Find the original casing from schema
+                    const originalCol = tableSchema.find((s: any) => 
+                      (s.column_name || s.name || '').toLowerCase() === similarCol
+                    );
+                    const correctedCol = originalCol ? (originalCol.column_name || originalCol.name) : similarCol;
+                    console.log(`  → Using similar column: '${correctedCol}'`);
+                    validGroupByColumns.push(correctedCol);
+                  }
+                }
+              }
+              
+              if (validGroupByColumns.length === 0) {
+                console.error(`❌ No valid GROUP BY columns found! Using first available column as fallback.`);
+                // Use first available column as fallback
+                const firstCol = tableSchema[0];
+                const firstColName = firstCol.column_name || firstCol.name;
+                validGroupByColumns.push(firstColName);
+                console.log(`  Using fallback column: ${firstColName}`);
+              }
+              
+              stage.data.groupBy = validGroupByColumns;
+              console.log(`  Final GROUP BY columns: ${validGroupByColumns.join(', ')}`);
+              
+            } catch (err) {
+              console.warn(`  Could not validate GROUP BY columns, proceeding anyway:`, err);
+            }
+          }
+          
           // Generate SQL from the stage
           const sql = generateSQLFromStage(stage, inputTableName);
           console.log(`Generated SQL: ${sql}`);
@@ -1364,7 +1499,7 @@ function App() {
       
       // Set the last executed stage's result table as active
       if (lastExecutedTableId) {
-        setActiveTableId(lastExecutedTableId);
+        showTable(lastExecutedTableId);
       }
 
       // Update the stageToTableMap with all the new mappings
@@ -1576,7 +1711,7 @@ function App() {
           return newMap;
         });
       }
-      setActiveTableId(resultTableId);
+      showTable(resultTableId);
       setChartConfig({ type: chartType, xAxis, yAxis, zAxis });
       setStatus(`Done! Created result table with ${resultRows.length} rows.`);
       setError(null);
@@ -2096,7 +2231,7 @@ function App() {
               position: 'sticky',
               top: '0',
               minHeight: '400px',
-              maxHeight: 'calc(100vh - 100px)',
+              maxHeight: '100vh',
               overflowY: 'auto',
               paddingRight: '12px'
             }}>
@@ -2111,7 +2246,7 @@ function App() {
                 editingStageId={editingStageId}
                 newStage={newStage}
                 stageToTableMap={stageToTableMap}
-                onShowTable={(tableId) => setActiveTableId(tableId)}
+                onShowTable={handleTableSelect}
                 onExportJSON={exportStagesToJSON}
                 onExportImage={exportStagesToImage}
                 onClearFlow={handleClearFlow}
@@ -2124,7 +2259,7 @@ function App() {
               minWidth: 0, 
               overflowY: 'auto', 
               paddingLeft: '12px',
-              maxHeight: 'calc(100vh - 100px)'
+              maxHeight: '100vh'
             }}>
           {/* Error Message */}
           {error && (
@@ -2401,7 +2536,7 @@ function App() {
           {/* 4. Data Grid */}
           {/* Table Tabs */}
           <TableTabs 
-            tables={tables}
+            tables={tables.filter(t => !closedTableIds.has(t.id))}
             activeTableId={activeTableId}
             onTableSelect={handleTableSelect}
             onTableClose={handleTableClose}

@@ -560,19 +560,19 @@ function StageGraphFlowInner({
     if (saved) {
       return parseInt(saved, 10);
     }
-    // Calculate initial height to fit within 85vh left panel
+    // Calculate initial height to fit within 100vh left panel
     // Account for: padding (40px), header (~60px), button (~50px), resize handle (4px)
-    // Use ~70vh for canvas to leave some room
-    return Math.min(600, Math.floor(window.innerHeight * 0.7));
+    // Use ~90vh for canvas to leave some room
+    return Math.min(800, Math.floor(window.innerHeight * 0.9));
   });
   const [isResizingHeight, setIsResizingHeight] = useState(false);
   const canvasContainerRef = useRef<HTMLDivElement>(null);
   
-  // Calculate max canvas height based on viewport (85vh left panel minus header/button space)
+  // Calculate max canvas height based on viewport (100vh left panel minus header/button space)
   const maxCanvasHeight = useMemo(() => {
     // Account for: container padding (40px), header (~60px), button (~50px), resize handle (4px)
-    // Total overhead ~154px, use ~75vh for canvas to ensure it fits
-    return Math.floor(window.innerHeight * 0.75);
+    // Total overhead ~154px, use ~90vh for canvas to ensure it fits
+    return Math.floor(window.innerHeight * 0.9);
   }, []);
   
   // Ensure canvas height doesn't exceed max on mount

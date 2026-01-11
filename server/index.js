@@ -22,6 +22,20 @@ const upload = multer({
   }
 });
 
+// Configure multer for audio uploads
+const uploadAudio = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+  fileFilter: (req, file, cb) => {
+    // Accept audio files
+    if (file.mimetype.startsWith('audio/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only audio files are allowed'), false);
+    }
+  }
+});
+
 // Middleware
 app.use(cors());
 app.use(express.json());
@@ -60,12 +74,16 @@ function validateApiKey(apiKey) {
 const responseSchema = {
     type: SchemaType.OBJECT,
     properties: {
-        sql: { type: SchemaType.STRING, description: "The DuckDB SQL query to execute" },
+        isValid: { 
+            type: SchemaType.BOOLEAN, 
+            description: "Whether the audio contains a valid data transformation command. Set to false if audio is empty, music, or unrelated to data transformation." 
+        },
+        sql: { type: SchemaType.STRING, description: "The DuckDB SQL query to execute (only if isValid is true)" },
         chartType: { type: SchemaType.STRING, description: "One of: 'bar', 'line', 'area', 'scatter', 'd3-scatter', 'd3-line', 'd3-bar', '3d-scatter', '3d-surface', 'none'" },
         zAxis: { type: SchemaType.STRING, description: "Optional: The column name for the Z axis (for 3D charts)" },
         xAxis: { type: SchemaType.STRING, description: "The column name for the X axis" },
         yAxis: { type: SchemaType.STRING, description: "The column name for the Y axis" },
-        explanation: { type: SchemaType.STRING, description: "Brief explanation of what this query does" },
+        explanation: { type: SchemaType.STRING, description: "Brief explanation of what this query does, or error message if isValid is false" },
         transformationStages: {
             type: SchemaType.ARRAY,
             items: {
@@ -157,9 +175,13 @@ const responseSchema = {
                 required: ["type", "description"]
             },
             description: "Array of one or more transformation stages that represent the ETL pipeline steps"
+        },
+        isValid: {
+            type: SchemaType.BOOLEAN,
+            description: "Whether the audio contains valid speech about data transformation. Set to false if audio is empty, music, or unrelated content."
         }
     },
-    required: ["sql", "chartType", "explanation", "transformationStages"]
+    required: ["isValid", "explanation"]
 };
 
 app.get('/api/config', (req, res) => {
@@ -197,7 +219,7 @@ app.post('/api/transform', async (req, res) => {
         // Alternative models: gemini-1.5-pro, gemini-1.5-flash-latest
         const model = genAIInstance.getGenerativeModel({ 
             // model: "gemini-2.5-flash",
-            model: "gemini-3-flash-preview",
+            model: "gemini-2.0-flash-exp",
             generationConfig: {
                 responseMimeType: "application/json",
                 responseSchema: responseSchema
@@ -465,9 +487,9 @@ app.post('/api/analyze-flow-image', upload.single('image'), handleMulterError, a
         // Create a new instance with the provided API key
         const genAIInstance = new GoogleGenerativeAI(apiKeyToUse);
         
-        // Use Gemini 3 with vision capabilities
+        // Use Gemini 2.0 with vision capabilities
         const model = genAIInstance.getGenerativeModel({ 
-            model: "gemini-3-flash-preview",
+            model: "gemini-2.0-flash-exp",
             generationConfig: {
                 responseMimeType: "application/json",
                 responseSchema: imageAnalysisResponseSchema
@@ -883,12 +905,424 @@ REMEMBER: For a data_table with existing context, your primary goal is INTEGRATI
     }
 });
 
+// Error handler for multer audio upload errors (must be defined before routes)
+const handleAudioMulterError = (err, req, res, next) => {
+    if (err instanceof multer.MulterError) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+            return res.status(400).json({ error: "Audio file too large. Maximum size is 10MB." });
+        }
+        return res.status(400).json({ error: `Upload error: ${err.message}` });
+    }
+    if (err) {
+        return res.status(400).json({ error: err.message || "Audio upload error" });
+    }
+    next();
+};
+
+// Voice command endpoint - Send audio directly to Gemini for transformation
+app.post('/api/voice/command', uploadAudio.single('audio'), handleAudioMulterError, async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: "No audio file provided" });
+        }
+
+        const { apiKey, schema, allSchemas } = req.body;
+        
+        // Use API key from request body (if provided), fallback to environment variable
+        const apiKeyToUse = (apiKey && apiKey.trim()) || process.env.GEMINI_API_KEY;
+        
+        if (!apiKeyToUse) {
+            return res.status(400).json({ 
+                error: "API key is required. Please set it in Settings or set GEMINI_API_KEY environment variable in server/.env file." 
+            });
+        }
+        
+        // Validate API key format
+        if (!validateApiKey(apiKeyToUse)) {
+            return res.status(400).json({ 
+                error: "Invalid API key format. Please check your API key." 
+            });
+        }
+        
+        // Create a new instance with the provided API key
+        const genAIInstance = new GoogleGenerativeAI(apiKeyToUse);
+        
+        // Use Gemini 2.0 with audio support - it can process audio directly
+        const model = genAIInstance.getGenerativeModel({ 
+            model: "gemini-2.0-flash-exp", // Gemini 2.0 supports audio
+            generationConfig: {
+                responseMimeType: "application/json",
+                responseSchema: responseSchema
+            }
+        });
+        
+        // Parse schema
+        let parsedSchema = [];
+        let parsedAllSchemas = [];
+        try {
+            parsedSchema = schema ? JSON.parse(schema) : [];
+            parsedAllSchemas = allSchemas ? JSON.parse(allSchemas) : [];
+        } catch (e) {
+            console.warn('Failed to parse schema:', e);
+        }
+        
+        const schemasInfo = parsedAllSchemas.length > 0 ? 
+            `Available Tables:\n${parsedAllSchemas.map(s => `- ${s.tableName}: ${JSON.stringify(s.schema)}`).join('\n')}` :
+            `Current Table Schema (DuckDB):\n${JSON.stringify(parsedSchema)}`;
+        
+        // Convert audio buffer to base64
+        const audioBase64 = req.file.buffer.toString('base64');
+        const mimeType = req.file.mimetype || 'audio/webm';
+        
+        const prompt = `
+            You are a Data Engineer Expert.
+            
+            ${schemasInfo}
+
+            The user has provided a VOICE COMMAND describing how they want to transform their dataset.
+            Listen to the audio carefully and:
+            1. First, transcribe exactly what the user said (word-for-word transcription)
+            2. Detect if the audio is EMPTY (no speech/words), MUSIC, or UNRELATED to data transformation
+            3. Then understand what transformation they want based on the audio
+            
+            CRITICAL VALIDATION - YOU MUST CHECK THESE FIRST:
+            
+            A. If the audio is EMPTY (silence, no words, no speech detected):
+               - Set isValid to false
+               - Set explanation to: "No speech was detected in the audio. Please speak clearly about how you want to transform your data."
+               - Do NOT include sql, chartType, transformationStages, xAxis, yAxis, zAxis fields
+               - Only return: {"isValid": false, "explanation": "..."}
+            
+            B. If the audio is MUSIC, background noise, or UNRELATED content:
+               - Set isValid to false
+               - Set explanation to: "The audio appears to be [music/unrelated content], not a data transformation command. Please provide a clear voice instruction about how you want to transform your data."
+               - Do NOT include sql, chartType, transformationStages, xAxis, yAxis, zAxis fields
+               - Only return: {"isValid": false, "explanation": "..."}
+            
+            C. If the audio contains a valid data transformation request:
+               - Set isValid to true
+               - In explanation, start with "User said: [exact transcription]" followed by your understanding
+               - Proceed with generating SQL, chartType, transformationStages, xAxis, yAxis, zAxis as normal
+               - Return full response with all fields
+            
+            CRITICAL: When isValid is false, you MUST NOT include sql, chartType, or transformationStages in your response. Only return isValid and explanation.
+
+            Rules:
+            1. Write valid DuckDB SQL.
+            2. If the user asks to "Filter" or "Join", write the SQL to create a NEW result set.
+            3. Suggest a chart type that best visualizes the result:
+               - Use 'bar', 'line', 'area', 'scatter' for standard 2D charts
+               - Use 'd3-scatter', 'd3-line', 'd3-bar' for D3.js visualizations
+               - Use '3d-scatter' or '3d-surface' if the data has 3 dimensions (provide zAxis)
+            4. If the result is just a table (like a raw list), set chartType to 'none'.
+            5. If the data has 3 numeric columns, consider using '3d-scatter' with zAxis.
+            6. CRITICAL: Analyze your SQL query and provide transformationStages array with one or more stages:
+               - Analyze the SQL to determine what operations it performs
+               - Break down complex SQL into logical stages (e.g., FILTER -> JOIN -> SORT)
+               - Each stage MUST have a proper type based on the SQL operation:
+                 * If SQL contains JOIN/LEFT JOIN/RIGHT JOIN/FULL OUTER JOIN → use type "JOIN"
+                 * If SQL contains UNION/UNION ALL → use type "UNION"
+                 * If SQL contains WHERE clause → use type "FILTER"
+                 * If SQL contains GROUP BY → use type "GROUP"
+                 * If SQL selects specific columns (not SELECT *) → use type "SELECT"
+                 * If SQL contains ORDER BY → use type "SORT"
+                 * If SQL contains aggregate functions without GROUP BY → use type "AGGREGATE"
+                 * Only use "CUSTOM" if the SQL doesn't fit any of the above categories
+               
+               - For each stage, extract and populate the appropriate data fields:
+                 * JOIN: joinType (INNER, LEFT, RIGHT, FULL OUTER), leftTable, rightTable, leftKey, rightKey
+                 * UNION: unionType (UNION or UNION ALL), tables array
+                 * FILTER: table, column, operator (=, !=, >, <, >=, <=, LIKE, IN, NOT IN), value, or conditions array
+                 * GROUP: groupBy array, aggregations array with function (SUM, COUNT, AVG, MAX, MIN), column, alias
+                 * SELECT: columns array
+                 * SORT: orderBy array with column and direction (ASC/DESC)
+                 * AGGREGATE: aggregations array with function, column, alias
+                 * CUSTOM: sql string
+               
+               - MANDATORY: You MUST return the transformationStages array. It is a required field in the response schema.
+               - Always analyze the SQL structure to determine the correct stage types. DO NOT default to CUSTOM unless truly necessary.
+               - Break down complex queries into multiple stages in the correct order (e.g., JOIN first, then GROUP, then SORT).
+        `;
+        
+        const audioPart = {
+            inlineData: {
+                data: audioBase64,
+                mimeType: mimeType
+            }
+        };
+        
+        try {
+            const result = await model.generateContent([prompt, audioPart]);
+            const response = result.response.text();
+            const parsedResponse = JSON.parse(response);
+            
+            // Ensure isValid is set (default to true for backward compatibility, but should always be set)
+            if (parsedResponse.isValid === undefined) {
+                parsedResponse.isValid = true;
+            }
+            
+            // Extract transcript from explanation (which should start with "User said: ...")
+            let transcript = "Voice command processed";
+            if (parsedResponse.explanation) {
+                const match = parsedResponse.explanation.match(/User said:\s*(.+?)(?:\n|$)/i);
+                if (match) {
+                    transcript = match[1].trim();
+                } else if (parsedResponse.explanation.includes("[No speech detected]")) {
+                    transcript = "[No speech detected]";
+                } else {
+                    // Fallback: use first part of explanation
+                    transcript = parsedResponse.explanation.split('.')[0].replace(/^User said:\s*/i, '').trim();
+                }
+            }
+            
+            // If audio is invalid, ensure we don't have transformation data
+            if (parsedResponse.isValid === false) {
+                // Remove transformation-related fields if they exist
+                delete parsedResponse.sql;
+                delete parsedResponse.transformationStages;
+                delete parsedResponse.chartType;
+                delete parsedResponse.xAxis;
+                delete parsedResponse.yAxis;
+                delete parsedResponse.zAxis;
+            }
+            
+            res.json({
+                transcript: transcript,
+                ...parsedResponse
+            });
+        } catch (audioError) {
+            console.error('Audio processing error:', audioError);
+            // Fallback: try to get transcript using a simpler model
+            try {
+                const fallbackModel = genAIInstance.getGenerativeModel({ 
+                    model: "gemini-1.5-flash" 
+                });
+                const transcriptResult = await fallbackModel.generateContent([
+                    "Transcribe this audio to text. Return only the transcribed text, nothing else.",
+                    audioPart
+                ]);
+                const transcript = transcriptResult.response.text();
+                res.status(400).json({ 
+                    error: "Audio processing failed, but here's the transcript",
+                    transcript: transcript,
+                    details: audioError.message 
+                });
+            } catch (fallbackError) {
+                res.status(400).json({ 
+                    error: "Audio processing not supported. Please ensure you're using a Gemini model that supports audio (gemini-2.0-flash-exp or gemini-1.5-pro).",
+                    details: audioError.message 
+                });
+            }
+        }
+    } catch (error) {
+        console.error('Error processing voice command:', error);
+        res.status(500).json({ error: "Voice command processing failed", details: error.message });
+    }
+});
+
+// Voice chat endpoint with audio input - Send audio directly to Gemini for conversation
+app.post('/api/voice/chat-audio', uploadAudio.single('audio'), handleAudioMulterError, async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: "No audio file provided" });
+        }
+
+        const { apiKey, history, schema } = req.body;
+        
+        // Use API key from request body (if provided), fallback to environment variable
+        const apiKeyToUse = (apiKey && apiKey.trim()) || process.env.GEMINI_API_KEY;
+        
+        if (!apiKeyToUse) {
+            return res.status(400).json({ 
+                error: "API key is required. Please set it in Settings or set GEMINI_API_KEY environment variable in server/.env file." 
+            });
+        }
+        
+        // Validate API key format
+        if (!validateApiKey(apiKeyToUse)) {
+            return res.status(400).json({ 
+                error: "Invalid API key format. Please check your API key." 
+            });
+        }
+        
+        // Create a new instance with the provided API key
+        const genAIInstance = new GoogleGenerativeAI(apiKeyToUse);
+        
+        // Use Gemini 2.0 with audio support for chat
+        const model = genAIInstance.getGenerativeModel({ 
+            model: "gemini-2.0-flash-exp", // Gemini 2.0 supports audio
+            generationConfig: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: SchemaType.OBJECT,
+                    properties: {
+                        transcript: {
+                            type: SchemaType.STRING,
+                            description: "The transcribed text of what the user said in the audio"
+                        },
+                        response: {
+                            type: SchemaType.STRING,
+                            description: "Your conversational response to the user"
+                        },
+                        shouldTransform: {
+                            type: SchemaType.BOOLEAN,
+                            description: "Whether the user wants to proceed with a data transformation. Set to true if the user confirms they want to transform the data, false if they're still discussing or asking questions."
+                        }
+                    }
+                }
+            }
+        });
+        
+        // Parse schema and history
+        let parsedSchema = [];
+        let parsedHistory = [];
+        try {
+            parsedSchema = schema ? JSON.parse(schema) : [];
+            parsedHistory = history ? JSON.parse(history) : [];
+        } catch (e) {
+            console.warn('Failed to parse schema/history:', e);
+        }
+        
+        // Build conversation context
+        const schemaInfo = parsedSchema.length > 0 
+            ? `Current Table Schema (DuckDB):\n${JSON.stringify(parsedSchema)}`
+            : "No tables are currently loaded.";
+        
+        // Build conversation history
+        let conversationHistory = '';
+        if (parsedHistory && Array.isArray(parsedHistory) && parsedHistory.length > 0) {
+            conversationHistory = '\n\nPrevious conversation:\n' + 
+                parsedHistory.map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`).join('\n');
+        }
+        
+        // Convert audio buffer to base64
+        const audioBase64 = req.file.buffer.toString('base64');
+        const mimeType = req.file.mimetype || 'audio/webm';
+        
+        const prompt = `You are a helpful AI assistant helping a user transform their dataset using natural language.
+
+${schemaInfo}${conversationHistory}
+
+The user is speaking to you via voice. Listen to their audio message and respond appropriately.
+
+CRITICAL VALIDATION - CHECK THESE FIRST:
+
+A. If the audio is EMPTY (silence, no words, no speech detected):
+   - Set transcript to "[No speech detected]"
+   - Set response to: "No speech was detected in the audio. Please speak clearly about your data transformation needs."
+   - Set shouldTransform to false
+
+B. If the audio is MUSIC, background noise, or UNRELATED content:
+   - Transcribe what you heard (e.g., "Music playing", "Background noise")
+   - Set response to: "The audio appears to be [music/unrelated content], not a message about data transformation. Please provide a clear voice message about how you want to transform your data."
+   - Set shouldTransform to false
+
+C. If the audio contains valid speech about data transformation:
+   - Transcribe the user's words in the transcript field
+   - Respond conversationally in the response field
+   - Set shouldTransform based on whether the user wants to proceed with transformation
+
+Your role:
+1. Check if the audio is EMPTY (silence, no speech detected)
+2. Check if the audio is MUSIC or UNRELATED content (not about data transformation)
+3. If empty: transcribe as "[No speech detected]" and politely explain no speech was heard. Set shouldTransform to false.
+4. If music or unrelated: transcribe what you heard and politely explain it's not related to data transformation. Set shouldTransform to false.
+5. If valid speech about data transformation: proceed with normal conversation.
+
+Your role:
+1. First, transcribe what the user said in the "transcript" field.
+2. If the user is asking questions about the data or transformation, answer helpfully.
+3. If the user needs clarification about what transformation they want, ask specific questions.
+4. If the user has provided enough information to perform a transformation, confirm what you understand and indicate that you're ready to proceed.
+
+IMPORTANT: Only set "shouldTransform" to true if the user has clearly indicated they want to proceed with a transformation and you have enough information. Otherwise, set it to false and continue the conversation.
+
+Respond naturally and conversationally.`;
+
+        const audioPart = {
+            inlineData: {
+                data: audioBase64,
+                mimeType: mimeType
+            }
+        };
+        
+        try {
+            const result = await model.generateContent([prompt, audioPart]);
+            const response = result.response.text();
+            const parsedResponse = JSON.parse(response);
+            
+            res.json(parsedResponse);
+        } catch (audioError) {
+            console.error('Audio chat processing error:', audioError);
+            // Fallback: try to get transcript using a simpler model
+            try {
+                const fallbackModel = genAIInstance.getGenerativeModel({ 
+                    model: "gemini-1.5-flash" 
+                });
+                const transcriptResult = await fallbackModel.generateContent([
+                    "Transcribe this audio to text. Return only the transcribed text, nothing else.",
+                    audioPart
+                ]);
+                const transcript = transcriptResult.response.text();
+                res.status(400).json({ 
+                    error: "Audio processing failed, but here's the transcript",
+                    transcript: transcript,
+                    response: "I had trouble processing your audio. Could you please try again or type your message?",
+                    shouldTransform: false,
+                    details: audioError.message 
+                });
+            } catch (fallbackError) {
+                res.status(400).json({ 
+                    error: "Audio processing not supported. Please ensure you're using a Gemini model that supports audio (gemini-2.0-flash-exp or gemini-1.5-pro).",
+                    details: audioError.message 
+                });
+            }
+        }
+    } catch (error) {
+        console.error('Error in voice chat:', error);
+        res.status(500).json({ error: "Chat failed", details: error.message });
+    }
+});
+
 app.get('/health', (req, res) => {
     res.json({ status: 'ok' });
 });
 
+// Test endpoint to verify voice routes are registered
+app.get('/api/voice/test', (req, res) => {
+    res.json({ 
+        status: 'ok', 
+        message: 'Voice endpoints are registered',
+        endpoints: [
+            'POST /api/voice/command',
+            'POST /api/voice/chat-audio'
+        ]
+    });
+});
+
+// 404 handler - return JSON instead of HTML
+app.use((req, res) => {
+    res.status(404).json({ 
+        error: "Endpoint not found", 
+        path: req.path,
+        method: req.method 
+    });
+});
+
+// Global error handler - ensure we always return JSON
+app.use((err, req, res, next) => {
+    console.error('Unhandled error:', err);
+    res.status(err.status || 500).json({ 
+        error: err.message || "Internal server error",
+        details: process.env.NODE_ENV === 'development' ? err.stack : undefined
+    });
+});
+
 app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Voice endpoints available:`);
+    console.log(`  POST /api/voice/command`);
+    console.log(`  POST /api/voice/chat-audio`);
     if (!process.env.GEMINI_API_KEY) {
         console.warn('⚠️  WARNING: GEMINI_API_KEY not set. Please create a .env file in the server directory.');
     }
