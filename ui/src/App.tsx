@@ -91,6 +91,11 @@ function App() {
   const [showClearFlowDialog, setShowClearFlowDialog] = useState(false);
   // Toast notification state
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  // Demo mode: show step labels to guide new users (default off)
+  const [demoMode, setDemoMode] = useState<boolean>(() => {
+    const saved = localStorage.getItem('demo_mode');
+    return saved === 'true';
+  });
 
   // Get current active table data
   const activeTable = tables.find(t => t.id === activeTableId);
@@ -2202,6 +2207,11 @@ function App() {
           onAskBeforeLoadChange={(value) => {
             localStorage.setItem('flow_upload_ask_before', String(value));
           }}
+          demoMode={demoMode}
+          onDemoModeChange={(value) => {
+            setDemoMode(value);
+            localStorage.setItem('demo_mode', String(value));
+          }}
         />
 
       {/* Main Content Layout */}
@@ -2226,6 +2236,14 @@ function App() {
               overflowY: 'auto',
               paddingRight: '12px'
             }}>
+              {demoMode && (
+                <div style={{ marginBottom: '10px' }}>
+                  <div style={{ fontSize: '13px', fontWeight: '600', color: themeConfig.colors.primary, lineHeight: '1.4' }}>Stage flow</div>
+                  <p style={{ margin: '2px 0 0 0', fontSize: '12px', color: themeConfig.colors.textSecondary, lineHeight: '1.5' }}>
+                    View and edit your transformation pipeline here. Click a stage to see its result table or edit it.
+                  </p>
+                </div>
+              )}
               <StageGraphFlow
                 ref={stageFlowRef}
                 stages={transformationStages}
@@ -2382,6 +2400,16 @@ function App() {
             )}
           </div>
 
+          {/* Demo: Step 1 - File upload */}
+          {demoMode && (
+            <div style={{ marginBottom: '10px' }}>
+              <div style={{ fontSize: '13px', fontWeight: '600', color: themeConfig.colors.primary, lineHeight: '1.4' }}>Step 1 — Upload your data</div>
+              <p style={{ margin: '2px 0 0 0', fontSize: '12px', color: themeConfig.colors.textSecondary, lineHeight: '1.5' }}>
+                Drag and drop CSV file(s) here. Each file becomes a table you can use in transformations.
+              </p>
+            </div>
+          )}
+
           {/* File Upload Section - Consolidated */}
           <div style={{ marginBottom: '16px' }}>
             <div {...getRootProps()} style={{ 
@@ -2436,6 +2464,14 @@ function App() {
           {/* Homepage Content - Only show when no tables */}
           {tables.length === 0 && (
             <div style={{ marginTop: '16px' }}>
+              {demoMode && (
+                <div style={{ marginBottom: '10px' }}>
+                  <div style={{ fontSize: '13px', fontWeight: '600', color: themeConfig.colors.primary, lineHeight: '1.4' }}>Step 2 — Ask Gemini to transform</div>
+                  <p style={{ margin: '2px 0 0 0', fontSize: '12px', color: themeConfig.colors.textSecondary, lineHeight: '1.5' }}>
+                    Use the three tabs below: Chat (text), Upload (flow or table images), or Voice. Describe what you want and Gemini will add or edit stages.
+                  </p>
+                </div>
+              )}
               {/* Chat Field on Homepage */}
               <div style={{ marginBottom: '24px' }}>
                 <SmartTransform 
@@ -2451,11 +2487,15 @@ function App() {
                 />
               </div>
 
-              <h2 style={{ fontSize: '18px', marginBottom: '12px', color: themeConfig.colors.text, fontWeight: '600', lineHeight: '1.5' }}>Try Visualization Presets (Sample Data)</h2>
-              <p style={{ fontSize: '14px', color: themeConfig.colors.textSecondary, marginBottom: '16px', lineHeight: '1.5' }}>
-                Explore different visualization types with our sample sales data. Upload your own CSV to use your data.
-              </p>
-            {showVisualizationPresets && (
+              {!(demoMode && tables.length === 0) && (
+                <>
+                  <h2 style={{ fontSize: '18px', marginBottom: '12px', color: themeConfig.colors.text, fontWeight: '600', lineHeight: '1.5' }}>Try Visualization Presets (Sample Data)</h2>
+                  <p style={{ fontSize: '14px', color: themeConfig.colors.textSecondary, marginBottom: '16px', lineHeight: '1.5' }}>
+                    Explore different visualization types with our sample sales data. Upload your own CSV to use your data.
+                  </p>
+                </>
+              )}
+            {showVisualizationPresets && !(demoMode && tables.length === 0) && (
               <VisualizationPresets 
                 schema={mockSchema}
                 data={mockData}
@@ -2464,7 +2504,7 @@ function App() {
             )}
             
             {/* Show sample data table */}
-            {chartConfig && (
+            {chartConfig && !(demoMode && tables.length === 0) && (
               <>
                 <div style={{ color: themeConfig.colors.textSecondary, fontSize: '14px', marginTop: '16px', marginBottom: '8px', lineHeight: '1.5' }}>
                   Status: <strong>Showing sample data visualization</strong>
@@ -2486,9 +2526,45 @@ function App() {
         </div>
       )}
 
+          {/* Table view label (demo) + placeholder when no tables loaded */}
+          {tables.length === 0 && (
+            <div style={{ marginTop: '16px' }}>
+              {demoMode && (
+                <div style={{ marginBottom: '10px' }}>
+                  <div style={{ fontSize: '13px', fontWeight: '600', color: themeConfig.colors.primary, lineHeight: '1.4' }}>Table view</div>
+                  <p style={{ margin: '2px 0 0 0', fontSize: '12px', color: themeConfig.colors.textSecondary, lineHeight: '1.5' }}>
+                    Check results for each table here. Switch tabs to see loaded tables and the result of each transformation stage.
+                  </p>
+                </div>
+              )}
+              <div style={{
+                border: `1px dashed ${themeConfig.colors.border}`,
+                padding: '24px',
+                textAlign: 'center',
+                borderRadius: '8px',
+                background: themeConfig.colors.surfaceElevated
+              }}>
+                <p style={{ margin: 0, fontSize: '14px', fontWeight: '500', color: themeConfig.colors.textSecondary, lineHeight: '1.5' }}>
+                  No tables loaded yet
+                </p>
+                <p style={{ fontSize: '12px', color: themeConfig.colors.textTertiary, marginTop: '8px', marginBottom: 0, lineHeight: '1.5' }}>
+                  Upload CSV file(s) above to see your tables and transformation results here.
+                </p>
+              </div>
+            </div>
+          )}
+
       {/* 2. Transformation Section */}
         {tables.length > 0 && (
         <>
+          {demoMode && (
+            <div style={{ marginBottom: '10px' }}>
+              <div style={{ fontSize: '13px', fontWeight: '600', color: themeConfig.colors.primary, lineHeight: '1.4' }}>Step 2 — Ask Gemini to transform</div>
+              <p style={{ margin: '2px 0 0 0', fontSize: '12px', color: themeConfig.colors.textSecondary, lineHeight: '1.5' }}>
+                Use the three tabs below: Chat (text), Upload (flow or table images), or Voice. Describe what you want and Gemini will add or edit stages.
+              </p>
+            </div>
+          )}
           <SmartTransform 
             schema={schema} 
             onTransform={handleTransform} 
@@ -2525,6 +2601,14 @@ function App() {
           )}
 
           {/* 4. Data Grid */}
+          {demoMode && (
+            <div style={{ marginBottom: '10px' }}>
+              <div style={{ fontSize: '13px', fontWeight: '600', color: themeConfig.colors.primary, lineHeight: '1.4' }}>Table view</div>
+              <p style={{ margin: '2px 0 0 0', fontSize: '12px', color: themeConfig.colors.textSecondary, lineHeight: '1.5' }}>
+                Check results for each table here. Switch tabs to see loaded tables and the result of each transformation stage.
+              </p>
+            </div>
+          )}
           {/* Table Tabs */}
           <TableTabs 
             tables={tables.filter(t => !closedTableIds.has(t.id))}

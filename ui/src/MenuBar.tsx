@@ -13,6 +13,8 @@ interface Props {
   onFlowUploadActionChange: (action: 'replace' | 'add') => void;
   askBeforeLoad: boolean;
   onAskBeforeLoadChange: (value: boolean) => void;
+  demoMode: boolean;
+  onDemoModeChange: (value: boolean) => void;
 }
 
 export function MenuBar({ 
@@ -24,7 +26,9 @@ export function MenuBar({
   flowUploadAction,
   onFlowUploadActionChange,
   askBeforeLoad,
-  onAskBeforeLoadChange
+  onAskBeforeLoadChange,
+  demoMode,
+  onDemoModeChange
 }: Props) {
   const { theme, themeConfig, toggleTheme } = useTheme();
   const [showSettings, setShowSettings] = useState(false);
@@ -52,12 +56,17 @@ export function MenuBar({
     const saved = localStorage.getItem('use_sample_data');
     return saved === 'true';
   });
+  const [demoModeState, setDemoModeState] = useState(() => {
+    const saved = localStorage.getItem('demo_mode');
+    return saved === 'true';
+  });
 
   // Sync with props
   useEffect(() => {
     setFlowUploadActionState(flowUploadAction);
     setAskBeforeLoadState(askBeforeLoad);
-  }, [flowUploadAction, askBeforeLoad]);
+    setDemoModeState(demoMode);
+  }, [flowUploadAction, askBeforeLoad, demoMode]);
 
   // Listen for storage changes to update state
   useEffect(() => {
@@ -76,6 +85,9 @@ export function MenuBar({
       onAskBeforeLoadChange(askBefore);
       const useSample = localStorage.getItem('use_sample_data') === 'true';
       setUseSampleDataState(useSample);
+      const demo = localStorage.getItem('demo_mode') === 'true';
+      setDemoModeState(demo);
+      onDemoModeChange(demo);
     };
 
     window.addEventListener('storage', handleStorageChange);
@@ -83,7 +95,7 @@ export function MenuBar({
     return () => {
       window.removeEventListener('storage', handleStorageChange);
     };
-  }, [onFlowUploadActionChange, onAskBeforeLoadChange]);
+  }, [onFlowUploadActionChange, onAskBeforeLoadChange, onDemoModeChange]);
 
   // Close settings when clicking outside
   useEffect(() => {
@@ -339,7 +351,50 @@ export function MenuBar({
                 color: themeConfig.colors.textSecondary,
                 lineHeight: '1.5'
               }}>
-                When on, load sample tables (CSV) and sample stage flow (JSON) on startup. Turn off to start with empty tables.
+                Sample tables (CSV) and sample stage flow (JSON) are loaded when the app or web page initially loads. Turn off to start with empty tables.
+              </p>
+            </div>
+
+            {/* Demo Mode Toggle */}
+            <div style={{ 
+              marginTop: '16px', 
+              paddingTop: '16px', 
+              borderTop: `1px solid ${themeConfig.colors.border}` 
+            }}>
+              <label style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                cursor: 'pointer',
+                fontSize: '14px',
+                color: themeConfig.colors.text,
+                lineHeight: '1.5'
+              }}>
+                <span>Demo mode</span>
+                <input
+                  type="checkbox"
+                  checked={demoModeState}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    localStorage.setItem('demo_mode', String(checked));
+                    setDemoModeState(checked);
+                    onDemoModeChange(checked);
+                  }}
+                  style={{
+                    width: '18px',
+                    height: '18px',
+                    cursor: 'pointer',
+                    accentColor: themeConfig.colors.primary
+                  }}
+                />
+              </label>
+              <p style={{
+                margin: '8px 0 0 0',
+                fontSize: '12px',
+                color: themeConfig.colors.textSecondary,
+                lineHeight: '1.5'
+              }}>
+                When on, show step labels and short descriptions (Step 1, Step 2, stage flow, table view) to help new users learn the dashboard.
               </p>
             </div>
 
