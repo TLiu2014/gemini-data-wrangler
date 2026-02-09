@@ -48,6 +48,10 @@ export function MenuBar({
     }
     return saved === 'true';
   });
+  const [useSampleDataState, setUseSampleDataState] = useState(() => {
+    const saved = localStorage.getItem('use_sample_data');
+    return saved === 'true';
+  });
 
   // Sync with props
   useEffect(() => {
@@ -70,6 +74,8 @@ export function MenuBar({
       const askBefore = localStorage.getItem('flow_upload_ask_before') === 'true';
       setAskBeforeLoadState(askBefore);
       onAskBeforeLoadChange(askBefore);
+      const useSample = localStorage.getItem('use_sample_data') === 'true';
+      setUseSampleDataState(useSample);
     };
 
     window.addEventListener('storage', handleStorageChange);
@@ -119,7 +125,7 @@ export function MenuBar({
           fontWeight: '600', 
           color: 'white'
         }}>
-          Gemini 3 Data Agent
+          Gemini 3 Data Wrangler
         </h1>
       </div>
 
@@ -292,6 +298,48 @@ export function MenuBar({
                 lineHeight: '1.5'
               }}>
                 Toggle visibility of visualization preset buttons
+              </p>
+            </div>
+
+            {/* Use Sample Data Toggle */}
+            <div style={{ 
+              marginTop: '16px', 
+              paddingTop: '16px', 
+              borderTop: `1px solid ${themeConfig.colors.border}` 
+            }}>
+              <label style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                cursor: 'pointer',
+                fontSize: '14px',
+                color: themeConfig.colors.text,
+                lineHeight: '1.5'
+              }}>
+                <span>Use sample data</span>
+                <input
+                  type="checkbox"
+                  checked={useSampleDataState}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    localStorage.setItem('use_sample_data', String(checked));
+                    setUseSampleDataState(checked);
+                  }}
+                  style={{
+                    width: '18px',
+                    height: '18px',
+                    cursor: 'pointer',
+                    accentColor: themeConfig.colors.primary
+                  }}
+                />
+              </label>
+              <p style={{
+                margin: '8px 0 0 0',
+                fontSize: '12px',
+                color: themeConfig.colors.textSecondary,
+                lineHeight: '1.5'
+              }}>
+                When on, load sample tables (CSV) and sample stage flow (JSON) on startup. Turn off to start with empty tables.
               </p>
             </div>
 

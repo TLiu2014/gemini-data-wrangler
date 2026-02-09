@@ -26,17 +26,8 @@ import { EmptyState } from './EmptyState';
 import sampleStagesData from './sampleStages.json';
 import html2canvas from 'html2canvas';
 
-// ============================================================================
-// CONFIGURATION: Sample Data Preloading
-// ============================================================================
-// Set this to true to automatically load sample CSV files from src/sampleData
-// when the homepage opens. Set to false to disable preloading.
-// 
-// For development:
-//   - Set PRELOAD_SAMPLE_DATA = true to test with sample data
-//   - Set PRELOAD_SAMPLE_DATA = false to start with empty tables
-// ============================================================================
-const PRELOAD_SAMPLE_DATA = true;
+// Sample data (CSV tables + JSON stage flow) is controlled by the "Use sample data"
+// setting in Settings; default is off. When on, sample data loads on app start.
 
 // Error Boundary Component
 class ErrorBoundary extends Component<{ children: ReactNode; fallback?: ReactNode }, { hasError: boolean; error: Error | null }> {
@@ -296,14 +287,14 @@ function App() {
       .catch(err => console.warn('Could not fetch server config:', err));
   }, []);
 
-  // Load sample data when database and connection are ready (only once)
+  // Load sample data when database and connection are ready, only if setting is on (only once)
   useEffect(() => {
-    if (PRELOAD_SAMPLE_DATA && db && conn && !sampleDataLoaded) {
+    const useSampleData = localStorage.getItem('use_sample_data') === 'true';
+    if (useSampleData && db && conn && !sampleDataLoaded) {
       loadSampleData().then(() => {
         setSampleDataLoaded(true);
       });
-    } else if (!PRELOAD_SAMPLE_DATA && db && conn) {
-      // If preloading is disabled, just set status
+    } else if (!useSampleData && db && conn) {
       setStatus('Ready for data.');
     }
   }, [db, conn, sampleDataLoaded]);
